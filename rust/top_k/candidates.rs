@@ -62,9 +62,13 @@ fn base_candidates(
     if let Some(fixed) = step.fixed_destination {
         return Ok(vec![graph.zone_index[&fixed]]);
     }
-    let values = destinations
-        .activity(step.activity_id)
-        .expect("domain has values");
+    let values =
+        destinations
+            .activity(step.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: context.context_id,
+                origin: context.initial_zone,
+            })?;
     let mut result = BTreeSet::new();
     result.extend(
         destinations
@@ -169,7 +173,10 @@ pub(super) fn reverse_projection_candidates(
     }
     let values = destinations
         .activity(context.steps[layer].activity_id)
-        .expect("domain has values");
+        .ok_or(SamplerError::NoFeasibleSequence {
+            context_id: context.context_id,
+            origin: context.initial_zone,
+        })?;
     let candidates = graph
         .incoming_by_cost(next_zone)
         .filter_map(|(zone, _)| {

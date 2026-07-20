@@ -118,6 +118,23 @@ def test_bidirectional_top_k_stitches_complete_plan() -> None:
     )
     assert terminal_result.filter(pl.col("layer") == 3)["destination"].unique().to_list() == [1]
 
+    missing_activity_search = DestinationPlanSearch(
+        od_costs=od_costs,
+        destination_inputs=destination_inputs.filter(pl.col("activity_id") != 20),
+    )
+    with pytest.raises(ValueError, match="no feasible destination sequence"):
+        missing_activity_search.top_k(
+            steps=steps,
+            initial_locations=pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
+            logit_scale=1.0,
+            update_plan_timings=True,
+            use_shadow_prices=False,
+            exploration_seed=13,
+            frontier_width=8,
+            proposal_limit_per_source=2,
+            top_k=9,
+        )
+
 
 def test_bidirectional_top_k_supports_variable_anchor() -> None:
     steps, initial_locations, od_costs, destination_inputs = reference_steps()

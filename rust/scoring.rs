@@ -2,18 +2,75 @@
 
 use std::collections::BTreeMap;
 
-use crate::common::{fixed_destination_value, Parameters};
 use crate::errors::SamplerError;
 use crate::input::{Context, Step};
 use crate::model::{DestinationIndex, DestinationValue, Edge, OdGraph};
 
 pub(crate) const MIN_ACTIVITY_DURATION_HOURS: f64 = 1e-3;
 
-pub(crate) struct SearchProblem<'a> {
-    pub(crate) variable_by_layer: Vec<Option<usize>>,
-    pub(crate) first_choice_by_layer: Vec<bool>,
-    pub(crate) domains: Vec<&'a [usize]>,
-    pub(crate) has_cross_home_anchor: bool,
+#[derive(Clone, Copy, Debug)]
+pub struct Parameters {
+    pub logit_scale: f64,
+    pub update_plan_timings: bool,
+    pub use_shadow_prices: bool,
+    pub skip_infeasible: bool,
+}
+
+#[inline]
+pub(crate) fn fixed_destination_value(
+    activity_values: Option<&[Option<DestinationValue>]>,
+    destination: usize,
+) -> DestinationValue {
+    activity_values
+        .and_then(|values| values[destination])
+        .unwrap_or(DestinationValue {
+            log_opportunity_capacity: 0.0,
+            country_value_coefficient: 1.0,
+            saturation_utility: 1.0,
+            shadow_price: 0.0,
+        })
+}
+
+pub(crate) struct ScoringProblem {
+    first_choice_by_layer: Vec<bool>,
+}
+
+impl ScoringProblem {
+    #[inline]
+    pub(crate) fn is_first_choice(&self, layer: usize) -> bool {
+        self.first_choice_by_layer[layer]
+    }
+}
+
+pub(crate) fn build_scoring_problem(context: &Context) -> Result<ScoringProblem, SamplerError> {
+    let mut anchor_activities = BTreeMap::new();
+    let mut first_choice_by_layer = Vec::with_capacity(context.steps.len());
+    for step in &context.steps {
+        if step.fixed_destination.is_some() {
+            first_choice_by_layer.push(false);
+            continue;
+        }
+        let first_choice = if let Some(anchor_id) = step.anchor_id {
+            if let Some(activity_id) = anchor_activities.get(&anchor_id) {
+                if *activity_id != step.activity_id {
+                    return Err(SamplerError::InvalidInput(format!(
+                        "context {} uses anchor id {} for several activities",
+                        context.context_id, anchor_id
+                    )));
+                }
+                false
+            } else {
+                anchor_activities.insert(anchor_id, step.activity_id);
+                true
+            }
+        } else {
+            true
+        };
+        first_choice_by_layer.push(first_choice);
+    }
+    Ok(ScoringProblem {
+        first_choice_by_layer,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -21,102 +78,8 @@ pub(crate) struct ScoringInputs<'a> {
     pub(crate) graph: &'a OdGraph,
     pub(crate) destinations: &'a DestinationIndex,
     pub(crate) context: &'a Context,
-    pub(crate) problem: &'a SearchProblem<'a>,
+    pub(crate) problem: &'a ScoringProblem,
     pub(crate) parameters: Parameters,
-}
-
-fn split_ranges_at_home(graph: &OdGraph, context: &Context) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    for (layer, step) in context.steps.iter().enumerate() {
-        if step.fixed_destination == Some(context.initial_zone) {
-            ranges.push((start, layer + 1));
-            start = layer + 1;
-        }
-    }
-    if start < context.steps.len() {
-        ranges.push((start, context.steps.len()));
-    }
-    if ranges.is_empty() {
-        ranges.push((0, context.steps.len()));
-    }
-    debug_assert!(graph.zone_index.contains_key(&context.initial_zone));
-    ranges
-}
-
-pub(crate) fn build_problem<'a>(
-    graph: &OdGraph,
-    destinations: &'a DestinationIndex,
-    context: &Context,
-) -> Result<(SearchProblem<'a>, Vec<(usize, usize)>), SamplerError> {
-    let ranges = split_ranges_at_home(graph, context);
-    let mut segment_by_layer = vec![0usize; context.steps.len()];
-    for (segment, &(start, end)) in ranges.iter().enumerate() {
-        segment_by_layer[start..end].fill(segment);
-    }
-
-    let mut anchor_variables = BTreeMap::new();
-    let mut anchor_segment_by_id = BTreeMap::new();
-    let mut has_cross_home_anchor = false;
-    let mut variable_activities = Vec::new();
-    let mut variable_by_layer = Vec::with_capacity(context.steps.len());
-    let mut first_choice_by_layer = Vec::with_capacity(context.steps.len());
-
-    for (layer, step) in context.steps.iter().enumerate() {
-        if step.fixed_destination.is_some() {
-            variable_by_layer.push(None);
-            first_choice_by_layer.push(false);
-            continue;
-        }
-        let (variable, first_choice) = if let Some(anchor_id) = step.anchor_id {
-            if let Some(&variable) = anchor_variables.get(&anchor_id) {
-                if variable_activities[variable] != step.activity_id {
-                    return Err(SamplerError::InvalidInput(format!(
-                        "context {} uses anchor id {} for several activities",
-                        context.context_id, anchor_id
-                    )));
-                }
-                if anchor_segment_by_id[&anchor_id] != segment_by_layer[layer] {
-                    has_cross_home_anchor = true;
-                }
-                (variable, false)
-            } else {
-                let variable = variable_activities.len();
-                variable_activities.push(step.activity_id);
-                anchor_variables.insert(anchor_id, variable);
-                anchor_segment_by_id.insert(anchor_id, segment_by_layer[layer]);
-                (variable, true)
-            }
-        } else {
-            let variable = variable_activities.len();
-            variable_activities.push(step.activity_id);
-            (variable, true)
-        };
-        variable_by_layer.push(Some(variable));
-        first_choice_by_layer.push(first_choice);
-    }
-
-    let domains = variable_activities
-        .iter()
-        .map(|&activity_id| {
-            destinations
-                .domain(activity_id)
-                .filter(|domain| !domain.is_empty())
-                .ok_or(SamplerError::NoFeasibleSequence {
-                    context_id: context.context_id,
-                    origin: context.initial_zone,
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        SearchProblem {
-            variable_by_layer,
-            first_choice_by_layer,
-            domains,
-            has_cross_home_anchor,
-        },
-        ranges,
-    ))
 }
 
 pub(crate) fn adjusted_times(step: Step, edge: Edge) -> Option<(f64, f64)> {

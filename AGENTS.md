@@ -16,8 +16,8 @@ Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 - Python prepares Polars inputs and orchestrates Mobility. Rust owns compact
   indexes, feasibility, scoring, and search; no Polars in Rust hot loops.
 - Contract/invariants: `DESIGN.md`.
-- Active search: `rust/bidirectional.rs`; proposals/cache:
-  `rust/bidirectional/candidates.rs`.
+- Active search: `rust/top_k/mod.rs`; proposals/cache:
+  `rust/top_k/candidates.rs`.
 - Shared scoring: `rust/scoring.rs`; exact oracle: `rust/oracle.rs`; Python
   boundary: `rust/api.rs`.
 - Current decision/measurements: `experiments/active-bidirectional-top-k.md`,

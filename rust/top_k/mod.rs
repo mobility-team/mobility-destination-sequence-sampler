@@ -11,13 +11,13 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::common::{fixed_destination_value, Parameters};
 use crate::errors::SamplerError;
 use crate::input::Context;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
 use crate::scoring::{
-    build_problem, score_local_weight, score_zones, ScoringInputs, SearchProblem,
+    build_scoring_problem, fixed_destination_value, score_local_weight, score_zones, Parameters,
+    ScoringInputs, ScoringProblem,
 };
 
 mod candidates;
@@ -105,7 +105,7 @@ fn candidate_anchors_compatible(
 }
 
 #[derive(Debug, Default)]
-pub struct BidirectionalTopKReport {
+pub struct TopKReport {
     pub contexts: u64,
     pub forward_candidate_evaluations: u64,
     pub backward_candidate_evaluations: u64,
@@ -149,7 +149,7 @@ struct SearchInputs<'a> {
     graph: &'a OdGraph,
     destinations: &'a DestinationIndex,
     context: &'a Context,
-    problem: SearchProblem<'a>,
+    problem: ScoringProblem,
     parameters: Parameters,
     options: TopKOptions,
     anchor_slots: HashMap<u32, usize>,
@@ -171,7 +171,7 @@ impl SearchInputs<'_> {
 struct SearchScratch {
     candidate_cache: CandidateCache,
     local_scores: LocalScoreCache,
-    report: BidirectionalTopKReport,
+    report: TopKReport,
 }
 
 impl SearchScratch {
@@ -179,15 +179,15 @@ impl SearchScratch {
         Self {
             candidate_cache: CandidateCache::default(),
             local_scores: LocalScoreCache::default(),
-            report: BidirectionalTopKReport {
+            report: TopKReport {
                 contexts: 1,
-                ..BidirectionalTopKReport::default()
+                ..TopKReport::default()
             },
         }
     }
 }
 
-impl BidirectionalTopKReport {
+impl TopKReport {
     fn add(&mut self, other: &Self) {
         self.contexts += other.contexts;
         self.forward_candidate_evaluations += other.forward_candidate_evaluations;
@@ -1012,7 +1012,7 @@ fn search_context(
     context: &Context,
     parameters: Parameters,
     options: TopKOptions,
-) -> Result<(OutputTable, BidirectionalTopKReport), SamplerError> {
+) -> Result<(OutputTable, TopKReport), SamplerError> {
     let started = options.profile.then(Instant::now);
     if context.steps.len() < 3 {
         return Err(SamplerError::InvalidInput(format!(
@@ -1021,7 +1021,7 @@ fn search_context(
         )));
     }
     let build_started = options.profile.then(Instant::now);
-    let (problem, _) = build_problem(graph, destinations, context)?;
+    let problem = build_scoring_problem(context)?;
     let inputs = SearchInputs {
         graph,
         destinations,
@@ -1138,14 +1138,14 @@ fn search_context(
     Ok((output, scratch.report))
 }
 
-pub fn search_bidirectional_top_k_all(
+pub fn search_top_k_all(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     contexts: &[Context],
     parameters: Parameters,
     options: TopKOptions,
     n_threads: Option<usize>,
-) -> Result<(OutputTable, BidirectionalTopKReport), SamplerError> {
+) -> Result<(OutputTable, TopKReport), SamplerError> {
     let compute = || {
         contexts
             .par_iter()
@@ -1167,7 +1167,7 @@ pub fn search_bidirectional_top_k_all(
         compute()
     };
     let mut output = OutputTable::default();
-    let mut report = BidirectionalTopKReport::default();
+    let mut report = TopKReport::default();
     for result in results {
         match result {
             Ok((table, context_report)) => {

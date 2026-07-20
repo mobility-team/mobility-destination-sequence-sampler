@@ -1,13 +1,13 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyTuple};
 
-use crate::bidirectional::{search_bidirectional_top_k_all, BidirectionalTopKReport, TopKOptions};
-use crate::common::Parameters;
 use crate::errors::SamplerError;
 use crate::input::{parse_destination_inputs, parse_od_costs, parse_reference_contexts};
 use crate::model::{DestinationIndex, OdGraph};
 use crate::oracle::{search_reference_top_k, HeapSearchReport};
 use crate::output::to_polars_dataframe;
+use crate::scoring::Parameters;
+use crate::top_k::{search_top_k_all, TopKOptions, TopKReport};
 
 /// Active deterministic destination-plan search.
 ///
@@ -80,7 +80,7 @@ impl DestinationPlanSearch {
             skip_infeasible,
         };
         let (output, report) = py.allow_threads(|| {
-            search_bidirectional_top_k_all(
+            search_top_k_all(
                 &self.graph,
                 &self.destination_index,
                 &contexts,
@@ -161,7 +161,7 @@ impl DestinationPlanSearch {
     }
 }
 
-fn top_k_report_to_dict(py: Python<'_>, report: &BidirectionalTopKReport) -> PyResult<PyObject> {
+fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObject> {
     let result = PyDict::new(py);
     result.set_item("contexts", report.contexts)?;
     result.set_item(

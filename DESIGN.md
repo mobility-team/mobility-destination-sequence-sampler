@@ -25,11 +25,11 @@ each visit still receives activity/travel utility.
 ## Active search
 
 ```text
-api.rs -> search_bidirectional_top_k_all() -> search_context()
+api.rs -> search_top_k_all() -> search_context()
 ```
 
-- `bidirectional.rs`: frontiers, continuation guidance, refresh, stitch.
-- `bidirectional/candidates.rs`: bounded proposals and cache.
+- `top_k/mod.rs`: frontiers, continuation guidance, refresh, stitch.
+- `top_k/candidates.rs`: bounded proposals and cache.
 - New passes take `SearchInputs` + `SearchScratch`, not long argument lists.
 - `oracle.rs`: exact top-K oracle; it proves or fails at
   `max_states`, never approximates.

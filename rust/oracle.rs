@@ -5,15 +5,105 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use rayon::prelude::*;
 
-use crate::common::{fixed_destination_value, Parameters};
 use crate::errors::SamplerError;
 use crate::input::{Context, Step};
 use crate::model::{DestinationIndex, DestinationValue, OdGraph};
 use crate::output::{OutputRow, OutputTable};
 use crate::scoring::{
-    adjusted_times, build_problem, score_zones, ScoringInputs, SearchProblem,
-    MIN_ACTIVITY_DURATION_HOURS,
+    adjusted_times, build_scoring_problem, fixed_destination_value, score_zones, Parameters,
+    ScoringInputs, ScoringProblem, MIN_ACTIVITY_DURATION_HOURS,
 };
+
+struct OracleProblem<'a> {
+    scoring: ScoringProblem,
+    variable_by_layer: Vec<Option<usize>>,
+    domains: Vec<&'a [usize]>,
+    has_cross_home_anchor: bool,
+}
+
+fn split_ranges_at_home(graph: &OdGraph, context: &Context) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (layer, step) in context.steps.iter().enumerate() {
+        if step.fixed_destination == Some(context.initial_zone) {
+            ranges.push((start, layer + 1));
+            start = layer + 1;
+        }
+    }
+    if start < context.steps.len() {
+        ranges.push((start, context.steps.len()));
+    }
+    if ranges.is_empty() {
+        ranges.push((0, context.steps.len()));
+    }
+    debug_assert!(graph.zone_index.contains_key(&context.initial_zone));
+    ranges
+}
+
+fn build_oracle_problem<'a>(
+    graph: &OdGraph,
+    destinations: &'a DestinationIndex,
+    context: &Context,
+) -> Result<(OracleProblem<'a>, Vec<(usize, usize)>), SamplerError> {
+    let scoring = build_scoring_problem(context)?;
+    let ranges = split_ranges_at_home(graph, context);
+    let mut segment_by_layer = vec![0usize; context.steps.len()];
+    for (segment, &(start, end)) in ranges.iter().enumerate() {
+        segment_by_layer[start..end].fill(segment);
+    }
+
+    let mut anchor_variables = BTreeMap::new();
+    let mut anchor_segment_by_id = BTreeMap::new();
+    let mut has_cross_home_anchor = false;
+    let mut variable_activities = Vec::new();
+    let mut variable_by_layer = Vec::with_capacity(context.steps.len());
+    for (layer, step) in context.steps.iter().enumerate() {
+        if step.fixed_destination.is_some() {
+            variable_by_layer.push(None);
+            continue;
+        }
+        let variable = if let Some(anchor_id) = step.anchor_id {
+            if let Some(&variable) = anchor_variables.get(&anchor_id) {
+                if anchor_segment_by_id[&anchor_id] != segment_by_layer[layer] {
+                    has_cross_home_anchor = true;
+                }
+                variable
+            } else {
+                let variable = variable_activities.len();
+                variable_activities.push(step.activity_id);
+                anchor_variables.insert(anchor_id, variable);
+                anchor_segment_by_id.insert(anchor_id, segment_by_layer[layer]);
+                variable
+            }
+        } else {
+            let variable = variable_activities.len();
+            variable_activities.push(step.activity_id);
+            variable
+        };
+        variable_by_layer.push(Some(variable));
+    }
+    let domains = variable_activities
+        .iter()
+        .map(|&activity_id| {
+            destinations
+                .domain(activity_id)
+                .filter(|domain| !domain.is_empty())
+                .ok_or(SamplerError::NoFeasibleSequence {
+                    context_id: context.context_id,
+                    origin: context.initial_zone,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        OracleProblem {
+            scoring,
+            variable_by_layer,
+            domains,
+            has_cross_home_anchor,
+        },
+        ranges,
+    ))
+}
 #[derive(Clone)]
 struct HeapState {
     upper_bound: f64,
@@ -112,6 +202,33 @@ pub struct HeapSearchReport {
     pub complete_plans: u64,
     pub maximum_heap_size: u64,
     pub assignment_lattice: u128,
+}
+
+impl HeapSearchReport {
+    fn add_subsearch(&mut self, other: &Self) {
+        self.split_contexts += other.split_contexts;
+        self.conditioned_anchor_contexts += other.conditioned_anchor_contexts;
+        self.anchor_conditions_considered += other.anchor_conditions_considered;
+        self.anchor_conditions_pruned += other.anchor_conditions_pruned;
+        self.incumbent_contexts += other.incumbent_contexts;
+        self.incumbent_children_considered += other.incumbent_children_considered;
+        self.children_pruned_by_incumbent += other.children_pruned_by_incumbent;
+        self.queue_entries_popped += other.queue_entries_popped;
+        self.sibling_entries_popped += other.sibling_entries_popped;
+        self.states_popped += other.states_popped;
+        self.states_pushed += other.states_pushed;
+        self.children_considered += other.children_considered;
+        self.complete_plans += other.complete_plans;
+        self.maximum_heap_size = self.maximum_heap_size.max(other.maximum_heap_size);
+    }
+
+    fn add_context_result(&mut self, other: &Self) {
+        self.contexts += other.contexts;
+        self.add_subsearch(other);
+        self.assignment_lattice = self
+            .assignment_lattice
+            .saturating_add(other.assignment_lattice);
+    }
 }
 
 #[derive(Clone)]
@@ -225,7 +342,7 @@ fn append_ranked_plans(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     plans: Vec<Vec<usize>>,
     parameters: Parameters,
 ) -> Result<(), SamplerError> {
@@ -236,7 +353,7 @@ fn append_ranked_plans(
                 graph,
                 destinations,
                 context,
-                problem,
+                problem: &problem.scoring,
                 parameters,
             },
             &zones,
@@ -355,7 +472,7 @@ fn build_layer_upper_bounds(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     parameters: Parameters,
 ) -> Vec<LayerUpperBound> {
     context
@@ -425,7 +542,7 @@ fn activity_utility_upper_bound(
 fn relaxed_candidates(
     graph: &OdGraph,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     layer: usize,
 ) -> Vec<usize> {
     context.steps[layer].fixed_destination.map_or_else(
@@ -438,7 +555,7 @@ fn build_relaxed_suffix_bounds(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     parameters: Parameters,
     layer_bounds: &[LayerUpperBound],
 ) -> Vec<Vec<f64>> {
@@ -465,12 +582,13 @@ fn build_relaxed_suffix_bounds(
                 };
                 let value =
                     fixed_destination_value(destinations.activity(step.activity_id), destination);
-                let attraction =
-                    if step.fixed_destination.is_some() || !problem.first_choice_by_layer[layer] {
-                        0.0
-                    } else {
-                        value.log_opportunity_capacity
-                    };
+                let attraction = if step.fixed_destination.is_some()
+                    || !problem.scoring.is_first_choice(layer)
+                {
+                    0.0
+                } else {
+                    value.log_opportunity_capacity
+                };
                 let activity_utility = (activity_coefficient(value, step, parameters)
                     * step.mean_duration_per_person
                     * duration_factor)
@@ -495,11 +613,11 @@ fn build_relaxed_suffix_bounds(
 fn attraction_upper_bound(
     destinations: &DestinationIndex,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     layer: usize,
 ) -> f64 {
     let step = context.steps[layer];
-    if step.fixed_destination.is_some() || !problem.first_choice_by_layer[layer] {
+    if step.fixed_destination.is_some() || !problem.scoring.is_first_choice(layer) {
         return 0.0;
     }
     problem.domains[problem.variable_by_layer[layer].unwrap()]
@@ -514,7 +632,7 @@ fn anchor_condition_upper_bound(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     anchor_id: u32,
     anchor_zone: usize,
     parameters: Parameters,
@@ -535,7 +653,7 @@ fn anchor_condition_upper_bound(
             .max(0.0);
         bound += parameters.logit_scale
             * (coefficient * step.mean_duration_per_person * duration_factor).max(0.0);
-        bound += if is_conditioned_anchor && problem.first_choice_by_layer[layer] {
+        bound += if is_conditioned_anchor && problem.scoring.is_first_choice(layer) {
             destination_value.unwrap().log_opportunity_capacity
         } else if is_conditioned_anchor {
             0.0
@@ -696,7 +814,7 @@ fn exact_activity_utility(
 fn heap_candidates<'a>(
     graph: &OdGraph,
     context: &Context,
-    problem: &'a SearchProblem<'a>,
+    problem: &'a OracleProblem<'a>,
     state: &'a HeapState,
     layer: usize,
 ) -> Result<&'a [usize], usize> {
@@ -717,7 +835,7 @@ fn pending_children_for_state(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     state: &HeapState,
     parameters: Parameters,
     minimum_edge_cost: f64,
@@ -782,7 +900,7 @@ fn pending_children_for_state(
                 );
         }
         let attraction =
-            if step.fixed_destination.is_some() || !problem.first_choice_by_layer[layer] {
+            if step.fixed_destination.is_some() || !problem.scoring.is_first_choice(layer) {
                 0.0
             } else {
                 destination_value.log_opportunity_capacity
@@ -831,7 +949,7 @@ fn greedy_incumbent(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
-    problem: &SearchProblem<'_>,
+    problem: &OracleProblem<'_>,
     initial: &HeapState,
     parameters: Parameters,
     minimum_edge_cost: f64,
@@ -903,7 +1021,7 @@ fn search_reference_top_k_sequential(
 
     for context in contexts {
         report.contexts += 1;
-        let (problem, ranges) = build_problem(graph, destinations, context)?;
+        let (problem, ranges) = build_oracle_problem(graph, destinations, context)?;
         let lattice = problem.domains.iter().fold(1u128, |count, domain| {
             count.saturating_mul(domain.len() as u128)
         });
@@ -923,7 +1041,7 @@ fn search_reference_top_k_sequential(
                         steps,
                     };
                     let (segment_problem, _) =
-                        build_problem(graph, destinations, &segment_context)?;
+                        build_oracle_problem(graph, destinations, &segment_context)?;
                     let segment_k = segment_problem
                         .domains
                         .iter()
@@ -943,25 +1061,7 @@ fn search_reference_top_k_sequential(
                         &table,
                         segment_context.steps.len(),
                     ));
-                    report.conditioned_anchor_contexts +=
-                        segment_report.conditioned_anchor_contexts;
-                    report.anchor_conditions_considered +=
-                        segment_report.anchor_conditions_considered;
-                    report.anchor_conditions_pruned += segment_report.anchor_conditions_pruned;
-                    report.incumbent_contexts += segment_report.incumbent_contexts;
-                    report.incumbent_children_considered +=
-                        segment_report.incumbent_children_considered;
-                    report.children_pruned_by_incumbent +=
-                        segment_report.children_pruned_by_incumbent;
-                    report.queue_entries_popped += segment_report.queue_entries_popped;
-                    report.sibling_entries_popped += segment_report.sibling_entries_popped;
-                    report.states_popped += segment_report.states_popped;
-                    report.states_pushed += segment_report.states_pushed;
-                    report.children_considered += segment_report.children_considered;
-                    report.complete_plans += segment_report.complete_plans;
-                    report.maximum_heap_size = report
-                        .maximum_heap_size
-                        .max(segment_report.maximum_heap_size);
+                    report.add_subsearch(&segment_report);
                 }
                 report.split_contexts += 1;
                 append_ranked_plans(
@@ -1089,26 +1189,7 @@ fn search_reference_top_k_sequential(
                     1,
                     max_states,
                 )?;
-                report.split_contexts += conditioned_report.split_contexts;
-                report.conditioned_anchor_contexts +=
-                    conditioned_report.conditioned_anchor_contexts;
-                report.anchor_conditions_considered +=
-                    conditioned_report.anchor_conditions_considered;
-                report.anchor_conditions_pruned += conditioned_report.anchor_conditions_pruned;
-                report.incumbent_contexts += conditioned_report.incumbent_contexts;
-                report.incumbent_children_considered +=
-                    conditioned_report.incumbent_children_considered;
-                report.children_pruned_by_incumbent +=
-                    conditioned_report.children_pruned_by_incumbent;
-                report.queue_entries_popped += conditioned_report.queue_entries_popped;
-                report.sibling_entries_popped += conditioned_report.sibling_entries_popped;
-                report.states_popped += conditioned_report.states_popped;
-                report.states_pushed += conditioned_report.states_pushed;
-                report.children_considered += conditioned_report.children_considered;
-                report.complete_plans += conditioned_report.complete_plans;
-                report.maximum_heap_size = report
-                    .maximum_heap_size
-                    .max(conditioned_report.maximum_heap_size);
+                report.add_subsearch(&conditioned_report);
                 if table.destination.is_empty() {
                     continue;
                 }
@@ -1411,26 +1492,7 @@ pub fn search_reference_top_k(
     let mut report = HeapSearchReport::default();
     for (context_output, context_report) in tables {
         output.extend(context_output);
-        report.contexts += context_report.contexts;
-        report.split_contexts += context_report.split_contexts;
-        report.conditioned_anchor_contexts += context_report.conditioned_anchor_contexts;
-        report.anchor_conditions_considered += context_report.anchor_conditions_considered;
-        report.anchor_conditions_pruned += context_report.anchor_conditions_pruned;
-        report.incumbent_contexts += context_report.incumbent_contexts;
-        report.incumbent_children_considered += context_report.incumbent_children_considered;
-        report.children_pruned_by_incumbent += context_report.children_pruned_by_incumbent;
-        report.queue_entries_popped += context_report.queue_entries_popped;
-        report.sibling_entries_popped += context_report.sibling_entries_popped;
-        report.states_popped += context_report.states_popped;
-        report.states_pushed += context_report.states_pushed;
-        report.children_considered += context_report.children_considered;
-        report.complete_plans += context_report.complete_plans;
-        report.maximum_heap_size = report
-            .maximum_heap_size
-            .max(context_report.maximum_heap_size);
-        report.assignment_lattice = report
-            .assignment_lattice
-            .saturating_add(context_report.assignment_lattice);
+        report.add_context_result(&context_report);
     }
     Ok((output, report))
 }
