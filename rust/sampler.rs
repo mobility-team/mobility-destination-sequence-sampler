@@ -17,8 +17,6 @@ pub struct Parameters {
     pub seed: u64,
     pub n_draws: u32,
     pub skip_infeasible: bool,
-    pub wrapped_home_time_shadow_price: f64,
-    pub use_bidirectional_feasibility: bool,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

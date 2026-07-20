@@ -130,7 +130,7 @@ def test_ternary_reference_applies_both_adjacent_rigidity_adjustments() -> None:
     assert result["local_log_weight"][1] == pytest.approx(0.0)
 
 
-def test_second_order_solver_matches_repeated_anchor_enumeration() -> None:
+def archived_second_order_solver_matches_repeated_anchor_enumeration() -> None:
     zones = [0, 1, 2]
     costs = {
         (origin, destination): 0.2 + abs(origin - destination) * 0.3
@@ -282,7 +282,7 @@ def test_second_order_solver_matches_repeated_anchor_enumeration() -> None:
     assert without_forward_feasibility["forward_pair_states"] == 0
 
 
-def test_second_order_solver_rejects_a_locally_infeasible_destination() -> None:
+def archived_second_order_solver_rejects_a_locally_infeasible_destination() -> None:
     od_costs = pl.DataFrame(
         {
             "origin": [0, 0],
@@ -340,7 +340,7 @@ def test_second_order_solver_rejects_a_locally_infeasible_destination() -> None:
     assert result["feasible_pair_states"] == 1
 
 
-def test_second_order_solver_applies_wrapped_home_shadow_price_at_day_boundaries() -> None:
+def archived_second_order_solver_applies_wrapped_home_shadow_price_at_day_boundaries() -> None:
     """Longer morning and evening trips lose wrapped home time cheaply."""
     od_costs = pl.DataFrame(
         {

@@ -18,10 +18,8 @@ pub struct OdGraph {
     pub offsets: Vec<usize>,
     pub edges: Vec<Edge>,
     edge_origins: Vec<u32>,
-    outgoing_time_edge_indices: Vec<u32>,
     outgoing_cost_edge_indices: Vec<u32>,
     incoming_offsets: Vec<usize>,
-    incoming_time_edge_indices: Vec<u32>,
     incoming_cost_edge_indices: Vec<u32>,
     dense_edge_indices: Option<Vec<usize>>,
 }
@@ -101,25 +99,6 @@ impl OdGraph {
             );
         }
 
-        // Candidate feasibility is monotone in travel time. Keep separate
-        // time-ordered edge indexes for early-stop scans while retaining the
-        // destination-ordered CSR above for exact pair lookup.
-        let mut outgoing_time_edge_indices: Vec<u32> = (0..edges.len())
-            .map(|edge_index| edge_index as u32)
-            .collect();
-        for origin in 0..zone_ids.len() {
-            outgoing_time_edge_indices[offsets[origin]..offsets[origin + 1]].sort_unstable_by(
-                |left, right| {
-                    let left_edge = edges[*left as usize];
-                    let right_edge = edges[*right as usize];
-                    left_edge
-                        .time
-                        .total_cmp(&right_edge.time)
-                        .then_with(|| left_edge.destination.cmp(&right_edge.destination))
-                },
-            );
-        }
-
         let mut incoming_offsets = vec![0usize; zone_ids.len() + 1];
         for edge in &edges {
             incoming_offsets[edge.destination + 1] += 1;
@@ -127,25 +106,13 @@ impl OdGraph {
         for index in 1..incoming_offsets.len() {
             incoming_offsets[index] += incoming_offsets[index - 1];
         }
-        let mut incoming_time_edge_indices = vec![0u32; edges.len()];
+        let mut incoming_cost_edge_indices = vec![0u32; edges.len()];
         let mut next_incoming_index = incoming_offsets[..zone_ids.len()].to_vec();
         for (edge_index, edge) in edges.iter().enumerate() {
             let index = next_incoming_index[edge.destination];
-            incoming_time_edge_indices[index] = edge_index as u32;
+            incoming_cost_edge_indices[index] = edge_index as u32;
             next_incoming_index[edge.destination] += 1;
         }
-        for destination in 0..zone_ids.len() {
-            incoming_time_edge_indices
-                [incoming_offsets[destination]..incoming_offsets[destination + 1]]
-                .sort_unstable_by(|left, right| {
-                    let left_edge = edges[*left as usize];
-                    let right_edge = edges[*right as usize];
-                    left_edge.time.total_cmp(&right_edge.time).then_with(|| {
-                        edge_origins[*left as usize].cmp(&edge_origins[*right as usize])
-                    })
-                });
-        }
-        let mut incoming_cost_edge_indices = incoming_time_edge_indices.clone();
         for destination in 0..zone_ids.len() {
             incoming_cost_edge_indices
                 [incoming_offsets[destination]..incoming_offsets[destination + 1]]
@@ -185,10 +152,8 @@ impl OdGraph {
             offsets,
             edges,
             edge_origins,
-            outgoing_time_edge_indices,
             outgoing_cost_edge_indices,
             incoming_offsets,
-            incoming_time_edge_indices,
             incoming_cost_edge_indices,
             dense_edge_indices,
         })
@@ -205,31 +170,10 @@ impl OdGraph {
     }
 
     #[inline]
-    pub fn outgoing_by_time(&self, origin: usize) -> impl Iterator<Item = Edge> + '_ {
-        self.outgoing_time_edge_indices[self.offsets[origin]..self.offsets[origin + 1]]
-            .iter()
-            .map(|&edge_index| self.edges[edge_index as usize])
-    }
-
-    #[inline]
     pub fn outgoing_by_cost(&self, origin: usize) -> impl Iterator<Item = Edge> + '_ {
         self.outgoing_cost_edge_indices[self.offsets[origin]..self.offsets[origin + 1]]
             .iter()
             .map(|&edge_index| self.edges[edge_index as usize])
-    }
-
-    #[inline]
-    pub fn incoming_by_time(&self, destination: usize) -> impl Iterator<Item = (usize, Edge)> + '_ {
-        self.incoming_time_edge_indices
-            [self.incoming_offsets[destination]..self.incoming_offsets[destination + 1]]
-            .iter()
-            .map(|&edge_index| {
-                let edge_index = edge_index as usize;
-                (
-                    self.edge_origins[edge_index] as usize,
-                    self.edges[edge_index],
-                )
-            })
     }
 
     #[inline]

@@ -72,13 +72,6 @@ intermediate home boundary depends on both neighbouring trips.
 
 ## Decision
 
-Keep the solver for exact reduced-resolution research and validation. Do not
-extend it as a raw-zone production replacement; reusable work across similar
-contexts would need evidence before reopening the direction.
-
-## Reproduce
-
-```powershell
-mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.explore_aggregated_backward_forward --clusters 64 128 256 --n-contexts 1000 --wrapped-home-shadow-price 2.0 --n-threads 8
-mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.analyze_second_order_contexts --contexts-per-cell 5 --n-threads 8
-```
+Archived from the working tree at `research-archive-2026-07-21`. Do not extend
+it as a raw-zone production replacement; retrieve the tagged source only if a
+new reusable-work hypothesis justifies reopening the direction.

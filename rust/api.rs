@@ -6,13 +6,11 @@ use crate::errors::SamplerError;
 use crate::input::{
     parse_contexts, parse_destination_inputs, parse_od_costs, parse_reference_contexts,
 };
-use crate::kernel_experiment::benchmark_hierarchical_kernel;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::to_polars_dataframe;
 use crate::particle::{sample_particles_all, ParticleReport};
 use crate::profile::ProfileReport;
 use crate::sampler::{sample_all, sample_all_with_profile, IterationCache, Parameters};
-use crate::second_order::{solve_second_order_all, SecondOrderResult};
 use crate::ternary_reference::{sample_reference_all, search_reference_top_k, HeapSearchReport};
 
 /// Historical research surface retained for the experiment scripts.
@@ -68,8 +66,6 @@ impl ExperimentalDestinationSampler {
             seed,
             n_draws,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let output = py.allow_threads(|| {
             sample_all(
@@ -110,8 +106,6 @@ impl ExperimentalDestinationSampler {
             seed,
             n_draws,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let (output, profile) = py.allow_threads(|| {
             sample_all_with_profile(
@@ -160,8 +154,6 @@ impl ExperimentalDestinationSampler {
             seed,
             n_draws,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let output = py.allow_threads(|| {
             sample_reference_all(
@@ -208,8 +200,6 @@ impl ExperimentalDestinationSampler {
             seed: 0,
             n_draws: 1,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let (output, report) = py.allow_threads(|| {
             search_reference_top_k(
@@ -225,53 +215,6 @@ impl ExperimentalDestinationSampler {
         let output = to_polars_dataframe(py, output)?;
         let report = heap_report_to_dict(py, &report)?;
         Ok(PyTuple::new(py, [output, report])?.into())
-    }
-
-    /// Experimental rigidity-aware recursion used to validate aggregated
-    /// destination models. It returns the partition and first marginal only.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, wrapped_home_time_shadow_price=0.0, use_bidirectional_feasibility=true, n_threads=None, skip_infeasible=false))]
-    #[allow(clippy::too_many_arguments)]
-    fn solve_second_order(
-        &self,
-        py: Python<'_>,
-        steps: &Bound<'_, PyAny>,
-        initial_locations: &Bound<'_, PyAny>,
-        logit_scale: f64,
-        update_plan_timings: bool,
-        use_shadow_prices: bool,
-        wrapped_home_time_shadow_price: f64,
-        use_bidirectional_feasibility: bool,
-        n_threads: Option<usize>,
-        skip_infeasible: bool,
-    ) -> PyResult<PyObject> {
-        validate_parameters(logit_scale, 1)?;
-        if !wrapped_home_time_shadow_price.is_finite() || wrapped_home_time_shadow_price < 0.0 {
-            return Err(SamplerError::InvalidInput(
-                "wrapped_home_time_shadow_price must be finite and non-negative".to_string(),
-            )
-            .into());
-        }
-        let contexts = parse_reference_contexts(steps, initial_locations)?;
-        let parameters = Parameters {
-            logit_scale,
-            update_plan_timings,
-            use_shadow_prices,
-            seed: 0,
-            n_draws: 1,
-            skip_infeasible,
-            wrapped_home_time_shadow_price,
-            use_bidirectional_feasibility,
-        };
-        let result = py.allow_threads(|| {
-            solve_second_order_all(
-                &self.graph,
-                &self.destination_index,
-                &contexts,
-                parameters,
-                n_threads,
-            )
-        })?;
-        second_order_to_dict(py, result)
     }
 
     /// Bounded sequential particle proposal sampler. Complete particles are
@@ -309,8 +252,6 @@ impl ExperimentalDestinationSampler {
             seed,
             n_draws,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let (output, report) = py.allow_threads(|| {
             sample_particles_all(
@@ -371,8 +312,6 @@ impl ExperimentalDestinationSampler {
             seed,
             n_draws: top_k,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let (output, report) = py.allow_threads(|| {
             search_bidirectional_top_k_all(
@@ -473,8 +412,6 @@ impl DestinationPlanSearch {
             seed: exploration_seed,
             n_draws: top_k,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let (output, report) = py.allow_threads(|| {
             search_bidirectional_top_k_all(
@@ -535,8 +472,6 @@ impl DestinationPlanSearch {
             seed: 0,
             n_draws: 1,
             skip_infeasible,
-            wrapped_home_time_shadow_price: 0.0,
-            use_bidirectional_feasibility: false,
         };
         let (output, report) = py.allow_threads(|| {
             search_reference_top_k(
@@ -673,36 +608,6 @@ fn particle_report_to_dict(py: Python<'_>, report: &ParticleReport) -> PyResult<
     Ok(result.into())
 }
 
-fn second_order_to_dict(py: Python<'_>, result: SecondOrderResult) -> PyResult<PyObject> {
-    let output = PyDict::new(py);
-    output.set_item("context_ids", result.context_ids)?;
-    output.set_item("log_partitions", result.log_partitions)?;
-    output.set_item(
-        "first_destination_probabilities",
-        result.first_destination_probabilities,
-    )?;
-    output.set_item("zone_ids", result.zone_ids)?;
-    output.set_item("wall_seconds", result.wall_time.as_secs_f64())?;
-    output.set_item("anchor_conditions", result.anchor_conditions)?;
-    output.set_item("infeasible_contexts", result.infeasible_contexts)?;
-    output.set_item("duration_checks", result.duration_checks)?;
-    output.set_item("duration_infeasible", result.duration_infeasible)?;
-    output.set_item("scored_transitions", result.scored_transitions)?;
-    output.set_item("pair_states", result.pair_states)?;
-    output.set_item("feasible_pair_states", result.feasible_pair_states)?;
-    output.set_item("forward_pair_states", result.forward_pair_states)?;
-    output.set_item(
-        "forward_reachable_pair_states",
-        result.forward_reachable_pair_states,
-    )?;
-    output.set_item("forward_time_edge_scans", result.forward_time_edge_scans)?;
-    output.set_item("forward_time_cutoffs", result.forward_time_cutoffs)?;
-    output.set_item("backward_time_edge_scans", result.backward_time_edge_scans)?;
-    output.set_item("backward_time_cutoffs", result.backward_time_cutoffs)?;
-    output.set_item("corridor_pair_states", result.corridor_pair_states)?;
-    Ok(output.into())
-}
-
 fn heap_report_to_dict(py: Python<'_>, report: &HeapSearchReport) -> PyResult<PyObject> {
     let result = PyDict::new(py);
     result.set_item("contexts", report.contexts)?;
@@ -824,8 +729,6 @@ pub fn sample_destination_sequences(
         seed,
         n_draws,
         skip_infeasible,
-        wrapped_home_time_shadow_price: 0.0,
-        use_bidirectional_feasibility: false,
     };
     let cache = IterationCache::default();
     let output = py.allow_threads(|| {
@@ -845,6 +748,5 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<DestinationPlanSearch>()?;
     module.add_class::<ExperimentalDestinationSampler>()?;
     module.add_function(wrap_pyfunction!(sample_destination_sequences, module)?)?;
-    module.add_function(wrap_pyfunction!(benchmark_hierarchical_kernel, module)?)?;
     Ok(())
 }

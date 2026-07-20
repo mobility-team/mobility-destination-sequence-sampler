@@ -36,11 +36,6 @@ target runtime, and per-profile factorization removes the reuse opportunity.
 
 ## Decision
 
-Pause this as a standalone runtime solution. Revisit only as a component of a
-fixed-budget proposal mechanism or a more targeted reusable approximation.
-
-## Reproduce
-
-```powershell
-mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.explore_kernel_rank --scales 0.25 --far-separation 0.25 --leaf-size 16 --benchmark-right-hand-sides 1 64 512
-```
+Archived from the working tree at `research-archive-2026-07-21`. Revisit only
+as a component of a fixed-budget proposal mechanism or a targeted reusable
+approximation; recover the tagged source if that happens.

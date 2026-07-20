@@ -121,21 +121,6 @@ class ExperimentalDestinationSampler:
         skip_infeasible: bool = False,
     ) -> tuple[Any, dict[str, int | str]]: ...
 
-    def solve_second_order(
-        self,
-        *,
-        steps: Any,
-        initial_locations: Any,
-        logit_scale: float,
-        update_plan_timings: bool,
-        use_shadow_prices: bool,
-        wrapped_home_time_shadow_price: float = 0.0,
-        use_bidirectional_feasibility: bool = True,
-        n_threads: int | None = None,
-        skip_infeasible: bool = False,
-    ) -> dict[str, Any]: ...
-
-
 def sample_destination_sequences(
     *,
     steps: Any,
