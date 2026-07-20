@@ -27,6 +27,7 @@ support before widening beams or candidate lists.
 ## Reproduce
 
 ```powershell
-mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_bidirectional_grand_geneve --contexts 1000 --threads 8 --profile
-mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_seam_refresh --contexts 50 --seam-refresh-per-prefix 0 --seam-refresh-per-prefix 1 --seam-refresh-per-prefix 2 --seam-refresh-per-prefix 4
+just benchmark-throughput
+just compare-quality
+just compare-refresh
 ```

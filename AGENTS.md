@@ -7,7 +7,13 @@ Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 
 ## Commands
 
-`just install`, `just build-release`, `just test`, `just check`.
+- `just install` — editable Python package.
+- `just build-release` — release PyO3 extension.
+- `just test` — Python tests (after a build).
+- `just check` — format, Clippy, then tests.
+- `just compare-quality` — 50-context bounded-versus-exact default comparison.
+- `just compare-refresh` — 0/1/2/4 refresh quality trade-off.
+- `just benchmark-throughput` — 1,000-context eight-thread runtime profile.
 
 Use `rg` for files/text; use `ast-grep` for syntax-aware Rust/Python search or
 mechanical refactors.
