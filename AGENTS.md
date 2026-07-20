@@ -7,9 +7,10 @@ Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 
 ## Commands
 
-- Install: `mamba run -n mobility-destination-sequence-sampler python -m pip install -e .`
-- Release build: `mamba run -n mobility-destination-sequence-sampler python -m maturin develop --release`
-- Tests: `mamba run -n mobility-destination-sequence-sampler python -m pytest`
+`just install`, `just build-release`, `just test`, `just check`.
+
+Use `rg` for files/text; use `ast-grep` for syntax-aware Rust/Python search or
+mechanical refactors.
 
 ## Ownership and routing
 
