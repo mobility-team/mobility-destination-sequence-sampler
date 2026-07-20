@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "mobility-destination-sequence-sampler"
 version = "0.1.0"
-description = "Exact Rust backward-forward destination sequence sampler for Mobility"
+description = "Bounded top-K destination-plan search and exact oracle for Mobility"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

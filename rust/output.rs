@@ -10,10 +10,6 @@ pub struct OutputTable {
     pub destination: Vec<u32>,
     pub local_log_weight: Vec<f64>,
     pub total_log_weight: Vec<f64>,
-    /// Populated only by the particle proposal path. Exact samplers retain
-    /// NaN here rather than changing their established result contract.
-    pub proposal_log_probability: Vec<f64>,
-    pub importance_log_weight: Vec<f64>,
 }
 
 pub struct OutputRow {
@@ -35,25 +31,6 @@ impl OutputTable {
         self.destination.push(row.destination);
         self.local_log_weight.push(row.local_log_weight);
         self.total_log_weight.push(row.total_log_weight);
-        self.proposal_log_probability.push(f64::NAN);
-        self.importance_log_weight.push(f64::NAN);
-    }
-
-    pub fn push_particle(
-        &mut self,
-        row: OutputRow,
-        proposal_log_probability: f64,
-        importance_log_weight: f64,
-    ) {
-        self.context_id.push(row.context_id);
-        self.draw_id.push(row.draw_id);
-        self.layer.push(row.layer);
-        self.origin.push(row.origin);
-        self.destination.push(row.destination);
-        self.local_log_weight.push(row.local_log_weight);
-        self.total_log_weight.push(row.total_log_weight);
-        self.proposal_log_probability.push(proposal_log_probability);
-        self.importance_log_weight.push(importance_log_weight);
     }
 
     pub fn extend(&mut self, other: Self) {
@@ -64,10 +41,6 @@ impl OutputTable {
         self.destination.extend(other.destination);
         self.local_log_weight.extend(other.local_log_weight);
         self.total_log_weight.extend(other.total_log_weight);
-        self.proposal_log_probability
-            .extend(other.proposal_log_probability);
-        self.importance_log_weight
-            .extend(other.importance_log_weight);
     }
 }
 
@@ -86,14 +59,6 @@ pub fn to_polars_dataframe(py: Python<'_>, output: OutputTable) -> PyResult<PyOb
     data.set_item(
         "total_log_weight",
         PyList::new(py, output.total_log_weight)?,
-    )?;
-    data.set_item(
-        "proposal_log_probability",
-        PyList::new(py, output.proposal_log_probability)?,
-    )?;
-    data.set_item(
-        "importance_log_weight",
-        PyList::new(py, output.importance_log_weight)?,
     )?;
     Ok(polars.getattr("DataFrame")?.call1((data,))?.into())
 }

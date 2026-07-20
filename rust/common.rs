@@ -1,4 +1,4 @@
-//! Small scoring primitives shared by active search and retained baselines.
+//! Shared search parameters and fixed-destination lookup.
 
 use crate::model::DestinationValue;
 
@@ -10,18 +10,6 @@ pub struct Parameters {
     pub seed: u64,
     pub n_draws: u32,
     pub skip_infeasible: bool,
-}
-
-#[inline]
-pub(crate) fn logaddexp(left: f64, right: f64) -> f64 {
-    if left == f64::NEG_INFINITY {
-        return right;
-    }
-    if right == f64::NEG_INFINITY {
-        return left;
-    }
-    let maximum = left.max(right);
-    maximum + (-(left - right).abs()).exp().ln_1p()
 }
 
 #[inline]
@@ -37,22 +25,4 @@ pub(crate) fn fixed_destination_value(
             saturation_utility: 1.0,
             shadow_price: 0.0,
         })
-}
-
-#[inline]
-pub(crate) fn alternative_gumbel(
-    seed: u64,
-    context_id: u64,
-    draw_id: u32,
-    alternative_index: u64,
-) -> f64 {
-    let mut value = seed
-        ^ context_id.wrapping_mul(0x9E3779B97F4A7C15)
-        ^ u64::from(draw_id).wrapping_mul(0xBF58476D1CE4E5B9)
-        ^ alternative_index.wrapping_mul(0x94D049BB133111EB);
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D049BB133111EB);
-    value ^= value >> 31;
-    let unit = ((value >> 11) as f64 + 0.5) / ((1u64 << 53) as f64);
-    -(-unit.ln()).ln()
 }

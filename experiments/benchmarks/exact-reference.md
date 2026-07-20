@@ -81,7 +81,7 @@ charge it to normal runs.
 ## Reproduce
 
 ```powershell
-mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_grand_geneve_cache
-mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_heap_search
-mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_heap_grand_geneve --n-contexts 100 --minimum-variable-layers 0 --maximum-variable-layers 20 --n-threads 8
+The historical enumeration and heap benchmark harnesses were archived at
+`research-archive-2026-07-21`. The active exact oracle is exercised through
+`DestinationPlanSearch.exact_top_k()` by the current quality analyses.
 ```

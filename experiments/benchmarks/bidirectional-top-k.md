@@ -20,7 +20,6 @@ and `top_k=10`.
 
 | Method | Wall time | Complete contexts | Infeasible contexts |
 |---|---:|---:|---:|
-| Particle baseline, 32 particles | 0.108 s | 744 | 256 |
 | Bounded top-K with right-to-left exchange and one F-to-B alternative | 0.158 s | 787 | 213 |
 
 The search evaluated 656,968 forward proposals, 143,761 backward proposals,

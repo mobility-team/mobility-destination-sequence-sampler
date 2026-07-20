@@ -23,17 +23,13 @@ being replaced by an exact dynamic program.
 
 ## Supporting and reference paths
 
-- `rust/particle.rs` / `ExperimentalDestinationSampler.sample_particles()`:
-  sequential bounded baseline and
-  fallback experiment.
 - `rust/ternary_reference.rs`: exact scorer and exact top-K oracle used for
   validation.
 - `analysis/`: quality comparisons and exploratory analyses.
 - `benchmarks/`: runtime and memory measurements.
 
-The root Python package exposes only `DestinationPlanSearch`. Historical
-methods remain compiled as `ExperimentalDestinationSampler` for these scripts;
-they are reference code, not an active API contract.
+The root Python package exposes only `DestinationPlanSearch`. Archived
+experiments are recoverable from `research-archive-2026-07-21`.
 
 ## Historical experiment notes
 

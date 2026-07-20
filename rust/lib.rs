@@ -7,7 +7,6 @@ mod errors;
 mod input;
 mod model;
 mod output;
-mod particle;
 mod ternary_reference;
 
 use pyo3::prelude::*;

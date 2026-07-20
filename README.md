@@ -1,6 +1,6 @@
 # mobility-destination-sequence-sampler
 
-Rust/Python destination-sequence sampling kernels for Mobility.
+Rust/Python bounded destination-plan search and exact-oracle kernels for Mobility.
 
 ## Scope
 
@@ -35,11 +35,11 @@ It is intentionally bounded and approximate. The current next direction is a
 small continuation-aware proposal for early forward layers, especially the
 first destination.
 
-### Historical experiments
+### Archived experiments
 
-Particle sampling, exhaustive sampling, and the second-order solver remain as
-compiled reference code for the scripts in `experiments/`. They are not part
-of the root package API.
+Particle sampling, exhaustive sampling, and the second-order solver are
+archived at `research-archive-2026-07-21`. The working tree deliberately
+contains only the bounded top-K path and its exact oracle.
 
 ### Exact oracle
 
@@ -75,8 +75,7 @@ plans, report = search.top_k(
 ```
 
 The active report uses search terminology: proposals evaluated, complete-plan
-candidates, stitched pairs, and optional phase timings. Historical reports and
-schemas remain available only through the internal experimental class.
+candidates, stitched pairs, and optional phase timings.
 
 ## Inputs
 

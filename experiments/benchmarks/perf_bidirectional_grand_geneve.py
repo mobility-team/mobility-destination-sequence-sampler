@@ -1,9 +1,7 @@
 """Read-only raw-zone timing for the bidirectional top-K search.
 
 This benchmark selects fixed-terminal contexts without variable anchors to
-measure the baseline search cost. It times the forward particle sampler with no
-retries alongside the stitch-layer top-K search using identical contexts and bounded
-candidate parameters.
+measure bounded top-K search cost using fixed candidate parameters.
 """
 
 from __future__ import annotations
@@ -15,7 +13,6 @@ from pathlib import Path
 import polars as pl
 
 from mobility_destination_sequence_sampler import DestinationPlanSearch
-from mobility_destination_sequence_sampler._core import ExperimentalDestinationSampler
 
 from experiments.benchmarks.perf_grand_geneve_cache import (
     DEFAULT_GROUP_DAY_TRIPS_FOLDER,
@@ -35,7 +32,6 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_GROUP_DAY_TRIPS_FOLDER,
     )
     parser.add_argument("--contexts", type=int, default=1_000)
-    parser.add_argument("--particles", type=int, default=32)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--frontier-width", type=int, default=32)
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
@@ -104,32 +100,10 @@ def main() -> None:
     selected = eligible_contexts(steps, args.contexts, args.exploration_seed)
     steps = steps.join(selected, on="context_id", how="semi")
     initial_locations = initial_locations.join(selected, on="context_id", how="semi")
-    particle_sampler = ExperimentalDestinationSampler(
-        od_costs=od_costs,
-        destination_inputs=destination_inputs,
-    )
     search = DestinationPlanSearch(
         od_costs=od_costs,
         destination_inputs=destination_inputs,
     )
-    common = {
-        "steps": steps,
-        "initial_locations": initial_locations,
-        "logit_scale": LOGIT_SCALE,
-        "update_plan_timings": True,
-        "use_shadow_prices": True,
-        "seed": args.exploration_seed,
-        "n_particles": args.particles,
-        "candidate_count": args.proposal_limit_per_source,
-        "n_draws": 1,
-        "n_threads": args.threads,
-        "skip_infeasible": True,
-    }
-
-    started = time.perf_counter()
-    forward, forward_report = particle_sampler.sample_particles(**common, max_retries=0)
-    forward_seconds = time.perf_counter() - started
-
     started = time.perf_counter()
     bidirectional, bidirectional_report = search.top_k(
         steps=steps,
@@ -151,10 +125,10 @@ def main() -> None:
     )
     bidirectional_seconds = time.perf_counter() - started
 
-    print("\ncomparison")
+    print("\nbounded top-K")
     print(
         f"workload  contexts={initial_locations.height} steps={steps.height} "
-        f"zones={od_costs['origin'].n_unique()} particles={args.particles} "
+        f"zones={od_costs['origin'].n_unique()} "
         f"top-k={args.top_k} "
         f"frontier-width={args.frontier_width} "
         f"stitch-bias={args.stitch_bias} "
@@ -162,13 +136,6 @@ def main() -> None:
         f"continuation={args.continuation_state_limit}x{args.continuation_proposal_limit} "
         f"seam-refresh={args.seam_refresh_per_prefix} "
         f"threads={args.threads}"
-    )
-    print(
-        f"forward   wall={forward_seconds:.3f}s "
-        f"plans={forward['context_id'].n_unique()} "
-        f"completed-particles={forward_report['completed_particles']} "
-        f"candidate-evaluations={forward_report['candidate_evaluations']} "
-        f"infeasible={forward_report['infeasible_contexts']}"
     )
     print(
         f"bidir     wall={bidirectional_seconds:.3f}s "
@@ -181,7 +148,6 @@ def main() -> None:
         f"stitch-pairs={bidirectional_report['stitch_pairs']} "
         f"infeasible={bidirectional_report['infeasible_contexts']}"
     )
-    print(f"bidir/forward wall ratio={bidirectional_seconds / forward_seconds:.2f}x")
     if args.profile:
         total_ns = bidirectional_report["total_search_ns"]
         if total_ns:

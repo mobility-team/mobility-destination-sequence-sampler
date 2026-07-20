@@ -20,11 +20,9 @@ threads, `frontier_width=32`, `proposal_limit_per_source=16`,
 
 | Method | Wall time | Complete contexts | Infeasible contexts |
 |---|---:|---:|---:|
-| Historical particle baseline, 32 particles | 0.090 s | 744 | 256 |
 | Bounded top-K with one F-to-B alternative per retained prefix | 0.135 s | 787 | 213 |
 
-The bounded search was 1.49 times the particle baseline wall time for this
-workload. It evaluated 357,150 forward-to-backward refresh proposals, added
+The bounded search evaluated 357,150 forward-to-backward refresh proposals, added
 494 boundary states, and spent 19% of aggregate Rust search time in the
 refresh. Seam lookahead was audited and removed: it preserved the same
 50-context oracle mass but raised wall time from 0.135 s to 0.258 s.
