@@ -10,8 +10,6 @@ pub enum SamplerError {
     Python(String),
     #[error("context {context_id} has no feasible destination sequence from zone {origin}")]
     NoFeasibleSequence { context_id: u64, origin: u32 },
-    #[error("context {context_id} has a cyclic destination factor graph")]
-    CyclicContext { context_id: u64 },
 }
 
 impl From<PyErr> for SamplerError {

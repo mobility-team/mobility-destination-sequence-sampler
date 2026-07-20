@@ -135,7 +135,7 @@ pub fn parse_destination_inputs(
         .collect())
 }
 
-pub fn parse_contexts(
+pub fn parse_reference_contexts(
     steps_df: &Bound<'_, PyAny>,
     initial_locations_df: &Bound<'_, PyAny>,
 ) -> Result<Vec<Context>, SamplerError> {
@@ -150,6 +150,9 @@ pub fn parse_contexts(
     let value_of_time: Vec<f64> = column_as_vec(steps_df, "value_of_time")?;
     let mean_duration_per_person: Vec<f64> = column_as_vec(steps_df, "mean_duration_per_person")?;
     let min_activity_time: Vec<f64> = column_as_vec(steps_df, "min_activity_time")?;
+    let arrival_time: Vec<f64> = column_as_vec(steps_df, "arrival_time")?;
+    let arrival_time_rigidity: Vec<f64> = column_as_vec(steps_df, "arrival_time_rigidity")?;
+    let departure_time_rigidity: Vec<f64> = column_as_vec(steps_df, "departure_time_rigidity")?;
     let len = context_id.len();
     for (name, actual) in [
         ("layer", layer.len()),
@@ -162,6 +165,9 @@ pub fn parse_contexts(
         ("value_of_time", value_of_time.len()),
         ("mean_duration_per_person", mean_duration_per_person.len()),
         ("min_activity_time", min_activity_time.len()),
+        ("arrival_time", arrival_time.len()),
+        ("arrival_time_rigidity", arrival_time_rigidity.len()),
+        ("departure_time_rigidity", departure_time_rigidity.len()),
     ] {
         check_len(name, len, actual)?;
     }
@@ -179,9 +185,9 @@ pub fn parse_contexts(
             value_of_time: value_of_time[index],
             mean_duration_per_person: mean_duration_per_person[index],
             min_activity_time: min_activity_time[index],
-            arrival_time: None,
-            arrival_time_rigidity: None,
-            departure_time_rigidity: None,
+            arrival_time: Some(arrival_time[index]),
+            arrival_time_rigidity: Some(arrival_time_rigidity[index]),
+            departure_time_rigidity: Some(departure_time_rigidity[index]),
         };
         if !step.departure_time.is_finite()
             || !step.next_departure_time.is_finite()
@@ -189,10 +195,15 @@ pub fn parse_contexts(
             || !step.value_of_time.is_finite()
             || !step.mean_duration_per_person.is_finite()
             || !step.min_activity_time.is_finite()
+            || !arrival_time[index].is_finite()
+            || !arrival_time_rigidity[index].is_finite()
+            || !departure_time_rigidity[index].is_finite()
             || step.min_activity_time <= 0.0
+            || !(0.0..=1.0).contains(&arrival_time_rigidity[index])
+            || !(0.0..=1.0).contains(&departure_time_rigidity[index])
         {
             return Err(SamplerError::InvalidInput(
-                "step utility and timing values must be finite, and min_activity_time must be positive"
+                "step values must be finite, min_activity_time must be positive, and timing rigidities must be between zero and one"
                     .to_string(),
             ));
         }
@@ -249,69 +260,6 @@ pub fn parse_contexts(
         return Err(SamplerError::InvalidInput(
             "initial_locations contains context ids that are absent from steps".to_string(),
         ));
-    }
-    Ok(contexts)
-}
-
-pub fn parse_reference_contexts(
-    steps_df: &Bound<'_, PyAny>,
-    initial_locations_df: &Bound<'_, PyAny>,
-) -> Result<Vec<Context>, SamplerError> {
-    let mut contexts = parse_contexts(steps_df, initial_locations_df)?;
-    let context_id: Vec<u64> = column_as_vec(steps_df, "context_id")?;
-    let layer: Vec<u32> = column_as_vec(steps_df, "layer")?;
-    let arrival_time: Vec<f64> = column_as_vec(steps_df, "arrival_time")?;
-    let rigidity: Vec<f64> = column_as_vec(steps_df, "arrival_time_rigidity")?;
-    let columns: Vec<String> = steps_df.getattr("columns")?.extract()?;
-    let departure_rigidity: Vec<f64> = if columns
-        .iter()
-        .any(|column| column == "departure_time_rigidity")
-    {
-        column_as_vec(steps_df, "departure_time_rigidity")?
-    } else {
-        // Older callers only supplied arrival rigidity. Retain their exact
-        // one-sided split while new callers provide independent endpoints.
-        rigidity.iter().map(|value| 1.0 - value).collect()
-    };
-    check_len("arrival_time", context_id.len(), arrival_time.len())?;
-    check_len("arrival_time_rigidity", context_id.len(), rigidity.len())?;
-    check_len(
-        "departure_time_rigidity",
-        context_id.len(),
-        departure_rigidity.len(),
-    )?;
-
-    let mut values = BTreeMap::new();
-    for index in 0..context_id.len() {
-        if !arrival_time[index].is_finite()
-            || !rigidity[index].is_finite()
-            || !departure_rigidity[index].is_finite()
-            || !(0.0..=1.0).contains(&rigidity[index])
-            || !(0.0..=1.0).contains(&departure_rigidity[index])
-        {
-            return Err(SamplerError::InvalidInput(
-                "arrival_time must be finite and timing rigidities must be between zero and one"
-                    .to_string(),
-            ));
-        }
-        values.insert(
-            (context_id[index], layer[index]),
-            (
-                arrival_time[index],
-                rigidity[index],
-                departure_rigidity[index],
-            ),
-        );
-    }
-    for context in &mut contexts {
-        for step in &mut context.steps {
-            let (arrival_time, rigidity, departure_rigidity) = values
-                .remove(&(context.context_id, step.layer))
-                .expect("reference timing columns match parsed steps");
-            step.arrival_time = Some(arrival_time);
-            step.arrival_time_rigidity = Some(rigidity);
-            step.departure_time_rigidity = Some(departure_rigidity);
-        }
     }
     Ok(contexts)
 }

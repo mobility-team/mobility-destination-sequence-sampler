@@ -6,8 +6,9 @@ mod common;
 mod errors;
 mod input;
 mod model;
+mod oracle;
 mod output;
-mod ternary_reference;
+mod scoring;
 
 use pyo3::prelude::*;
 

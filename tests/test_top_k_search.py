@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
 from mobility_destination_sequence_sampler import DestinationPlanSearch
 
@@ -100,6 +101,23 @@ def test_bidirectional_top_k_stitches_complete_plan() -> None:
         )
         assert destinations[0] == destinations[2]
 
+    terminal_result, _ = search.top_k(
+        steps=steps.with_columns(
+            fixed_destination=pl.when(pl.col("layer") == 3)
+            .then(pl.lit(1))
+            .otherwise(pl.col("fixed_destination"))
+        ),
+        initial_locations=pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
+        logit_scale=1.0,
+        update_plan_timings=True,
+        use_shadow_prices=False,
+        exploration_seed=13,
+        frontier_width=8,
+        proposal_limit_per_source=2,
+        top_k=9,
+    )
+    assert terminal_result.filter(pl.col("layer") == 3)["destination"].unique().to_list() == [1]
+
 
 def test_bidirectional_top_k_supports_variable_anchor() -> None:
     steps, initial_locations, od_costs, destination_inputs = reference_steps()
@@ -196,3 +214,34 @@ def test_bidirectional_top_k_matches_exact_when_the_beam_covers_the_toy_domain()
         ]
 
     assert plans(bounded) == plans(exact)
+
+
+def test_exact_oracle_fails_explicitly_at_its_state_budget() -> None:
+    steps, initial_locations, od_costs, destination_inputs = reference_steps()
+    search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
+
+    with pytest.raises(ValueError, match="exceeded max_states=1"):
+        search.exact_top_k(
+            steps=steps,
+            initial_locations=initial_locations,
+            logit_scale=1.0,
+            update_plan_timings=True,
+            use_shadow_prices=False,
+            top_k=1,
+            max_states=1,
+        )
+
+
+def test_search_requires_both_timing_rigidities() -> None:
+    steps, initial_locations, od_costs, destination_inputs = reference_steps()
+    search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
+
+    with pytest.raises(ValueError, match="departure_time_rigidity"):
+        search.top_k(
+            steps=steps.drop("departure_time_rigidity"),
+            initial_locations=initial_locations,
+            logit_scale=1.0,
+            update_plan_timings=True,
+            use_shadow_prices=False,
+            exploration_seed=13,
+        )

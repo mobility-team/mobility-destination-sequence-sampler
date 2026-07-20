@@ -8,7 +8,7 @@ Only bounded bidirectional top-K is active.
 | Current measurements | `../BENCHMARKS.md`, `benchmarks/bidirectional-top-k.md` |
 | Quality harness | `analysis/compare_bidirectional_top_k_grand_geneve.py` |
 | Runtime harness | `benchmarks/perf_bidirectional_grand_geneve.py` |
-| Exact oracle | `../rust/ternary_reference.rs` |
+| Exact oracle | `../rust/oracle.rs` |
 | Archived directions | `historical.md`, `lessons-learned.md` |
 
 The next hypothesis is continuation-aware support for early forward proposals.

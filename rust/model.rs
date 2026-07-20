@@ -125,7 +125,7 @@ impl OdGraph {
                 });
         }
 
-        // Destination sampling repeatedly looks up a small number of exact OD
+        // Bounded search repeatedly looks up a small number of exact OD
         // pairs. A dense index is cheap for near-complete matrices such as
         // Grand Genève, while sparse regional or national graphs keep the CSR
         // binary-search fallback.
@@ -269,8 +269,8 @@ impl DestinationIndex {
                 (activity_id, domain)
             })
             .collect();
-        // This is deliberately an iteration-level index: particle sampling
-        // must not sort or scan a full activity domain for every particle.
+        // This iteration-level index keeps bounded candidate construction from
+        // sorting or scanning a full activity domain for every frontier state.
         let attractive_by_activity = by_activity
             .iter()
             .map(|(&activity_id, values)| {
@@ -282,7 +282,7 @@ impl DestinationIndex {
                             .filter(|value| value.log_opportunity_capacity.is_finite())
                             .map(|value| {
                                 // Shadow prices are the saturation signal in
-                                // the particle proposal. Ranking it once is
+                                // bounded proposal. Ranking it once is
                                 // a compact approximation of the
                                 // step-specific utility term.
                                 (zone, value.log_opportunity_capacity + value.shadow_price)

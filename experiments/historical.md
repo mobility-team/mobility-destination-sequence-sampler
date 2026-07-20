@@ -9,5 +9,5 @@
 | Exact heap top-K | Retained oracle | Keep for small-case validation only. |
 
 Archived code and retired benchmark harnesses: `research-archive-2026-07-21`.
-The retained oracle is `rust/ternary_reference.rs`. Details and compact lessons
+The retained oracle is `rust/oracle.rs`. Details and compact lessons
 are in [`lessons-learned.md`](lessons-learned.md).

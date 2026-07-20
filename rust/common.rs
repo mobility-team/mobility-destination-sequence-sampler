@@ -1,4 +1,4 @@
-//! Shared search parameters and fixed-destination lookup.
+//! Shared scoring parameters and fixed-destination lookup.
 
 use crate::model::DestinationValue;
 
@@ -7,8 +7,6 @@ pub struct Parameters {
     pub logit_scale: f64,
     pub update_plan_timings: bool,
     pub use_shadow_prices: bool,
-    pub seed: u64,
-    pub n_draws: u32,
     pub skip_infeasible: bool,
 }
 

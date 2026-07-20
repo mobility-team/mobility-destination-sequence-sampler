@@ -18,7 +18,8 @@ Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 - Contract/invariants: `DESIGN.md`.
 - Active search: `rust/bidirectional.rs`; proposals/cache:
   `rust/bidirectional/candidates.rs`.
-- Exact oracle: `rust/ternary_reference.rs`; Python boundary: `rust/api.rs`.
+- Shared scoring: `rust/scoring.rs`; exact oracle: `rust/oracle.rs`; Python
+  boundary: `rust/api.rs`.
 - Current decision/measurements: `experiments/active-bidirectional-top-k.md`,
   `BENCHMARKS.md`. Archive decisions: `experiments/historical.md`.
 

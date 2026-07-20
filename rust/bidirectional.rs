@@ -16,11 +16,15 @@ use crate::errors::SamplerError;
 use crate::input::Context;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
-use crate::ternary_reference::{build_problem, score_local_weight, score_zones, ReferenceProblem};
+use crate::scoring::{
+    build_problem, score_local_weight, score_zones, ScoringInputs, SearchProblem,
+};
 
 mod candidates;
 
-use candidates::{candidates, reverse_projection_candidates, CandidateCache};
+use candidates::{
+    candidates, reverse_projection_candidates, CandidateCache, CandidateInputs, CandidateQuery,
+};
 
 struct PrefixNode {
     parent: Option<usize>,
@@ -56,31 +60,17 @@ struct LocalScoreCache {
 impl LocalScoreCache {
     fn score(
         &mut self,
-        graph: &OdGraph,
-        destinations: &DestinationIndex,
-        context: &Context,
-        problem: &ReferenceProblem<'_>,
+        inputs: ScoringInputs<'_>,
         layer: usize,
         origin: usize,
         destination: usize,
         next_destination: Option<usize>,
-        parameters: Parameters,
     ) -> Option<f64> {
         let key = (layer, origin, destination, next_destination);
         if let Some(score) = self.values.get(&key) {
             return *score;
         }
-        let score = score_local_weight(
-            graph,
-            destinations,
-            context,
-            problem,
-            layer,
-            origin,
-            destination,
-            next_destination,
-            parameters,
-        );
+        let score = score_local_weight(inputs, layer, origin, destination, next_destination);
         self.values.insert(key, score);
         score
     }
@@ -138,6 +128,8 @@ pub struct BidirectionalTopKReport {
 
 #[derive(Clone, Copy)]
 pub struct TopKOptions {
+    pub exploration_seed: u64,
+    pub result_limit: u32,
     pub frontier_width: usize,
     pub proposal_limit_per_source: usize,
     pub stitch_bias: i32,
@@ -157,10 +149,22 @@ struct SearchInputs<'a> {
     graph: &'a OdGraph,
     destinations: &'a DestinationIndex,
     context: &'a Context,
-    problem: ReferenceProblem<'a>,
+    problem: SearchProblem<'a>,
     parameters: Parameters,
     options: TopKOptions,
     anchor_slots: HashMap<u32, usize>,
+}
+
+impl SearchInputs<'_> {
+    fn scoring(&self) -> ScoringInputs<'_> {
+        ScoringInputs {
+            graph: self.graph,
+            destinations: self.destinations,
+            context: self.context,
+            problem: &self.problem,
+            parameters: self.parameters,
+        }
+    }
 }
 
 /// Per-context mutable state used by the bounded search passes.
@@ -275,52 +279,48 @@ fn initial_endpoint_score(
     Some(attraction - parameters.logit_scale * edge.cost)
 }
 
-fn best_continuation_score(
-    graph: &OdGraph,
-    destinations: &DestinationIndex,
-    context: &Context,
-    problem: &ReferenceProblem<'_>,
+struct ContinuationCandidate<'a> {
     layer: usize,
     previous_zone: usize,
-    candidate: usize,
-    prefix_anchors: &[Option<usize>],
-    candidate_slot: Option<usize>,
+    destination: usize,
+    prefix_anchors: &'a [Option<usize>],
+    anchor_slot: Option<usize>,
+}
+
+fn best_continuation_score(
+    inputs: &SearchInputs<'_>,
+    candidate: ContinuationCandidate<'_>,
     suffix_nodes: &[SuffixNode],
     suffix_frontier: &[usize],
-    parameters: Parameters,
     local_scores: &mut LocalScoreCache,
 ) -> Option<f64> {
     let mut best = f64::NEG_INFINITY;
     for &suffix_index in suffix_frontier {
         let suffix = &suffix_nodes[suffix_index];
-        if !candidate_anchors_compatible(prefix_anchors, &suffix.anchors, candidate_slot, candidate)
-        {
+        if !candidate_anchors_compatible(
+            candidate.prefix_anchors,
+            &suffix.anchors,
+            candidate.anchor_slot,
+            candidate.destination,
+        ) {
             continue;
         }
         let score = local_scores
             .score(
-                graph,
-                destinations,
-                context,
-                problem,
-                layer,
-                previous_zone,
-                candidate,
+                inputs.scoring(),
+                candidate.layer,
+                candidate.previous_zone,
+                candidate.destination,
                 Some(suffix.zone),
-                parameters,
             )
             .and_then(|left| {
                 local_scores
                     .score(
-                        graph,
-                        destinations,
-                        context,
-                        problem,
-                        layer + 1,
-                        candidate,
+                        inputs.scoring(),
+                        candidate.layer + 1,
+                        candidate.destination,
                         suffix.zone,
                         suffix.next.map(|index| suffix_nodes[index].zone),
-                        parameters,
                     )
                     .map(|right| left + right + suffix.exact_log_weight)
             });
@@ -340,7 +340,6 @@ fn forward_beam(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let problem = &inputs.problem;
     let parameters = inputs.parameters;
     let beam_width = inputs.options.frontier_width;
     let candidate_count = inputs.options.proposal_limit_per_source;
@@ -351,6 +350,13 @@ fn forward_beam(
     let candidate_cache = &mut scratch.candidate_cache;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
+    let candidate_inputs = CandidateInputs {
+        graph,
+        destinations,
+        context,
+        candidate_count,
+        exploration_seed: inputs.options.exploration_seed,
+    };
     let started = profile.then(Instant::now);
     let home = graph.zone_index[&context.initial_zone];
     let mut nodes = vec![PrefixNode {
@@ -370,18 +376,16 @@ fn forward_beam(
                 .anchor_id
                 .and_then(|anchor| anchor_slots.get(&anchor).copied());
             let mut candidate_zones = candidates(
-                graph,
-                destinations,
-                context,
-                layer,
-                parent.zone,
-                false,
-                state_index,
-                candidate_count,
-                parameters.seed,
+                candidate_inputs,
+                CandidateQuery {
+                    layer,
+                    reference_zone: parent.zone,
+                    reverse: false,
+                    state_index,
+                    anchor_slot: candidate_slot,
+                    anchors: &parent.anchors,
+                },
                 candidate_cache,
-                candidate_slot,
-                &parent.anchors,
             )?;
             let proposal_guidance_started = profile.then(Instant::now);
             if candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none()) {
@@ -406,9 +410,7 @@ fn forward_beam(
             if let Some(started) = proposal_guidance_started {
                 report.continuation_guidance_ns += started.elapsed().as_nanos() as u64;
             }
-            let previous_zone = if layer == 0 {
-                home
-            } else if layer == 1 {
+            let previous_zone = if layer <= 1 {
                 home
             } else {
                 nodes[parent.parent.expect("non-root forward parent")].zone
@@ -419,15 +421,11 @@ fn forward_beam(
                     initial_endpoint_score(graph, destinations, context, candidate, parameters)
                 } else {
                     local_scores.score(
-                        graph,
-                        destinations,
-                        context,
-                        problem,
+                        inputs.scoring(),
                         layer - 1,
                         previous_zone,
                         parent.zone,
                         Some(candidate),
-                        parameters,
                     )
                 };
                 if let Some(local_score) = local_score {
@@ -443,19 +441,17 @@ fn forward_beam(
                         .filter(|_| continuation_state_limit > 0)
                         .and_then(|suffix_frontier| {
                             best_continuation_score(
-                                graph,
-                                destinations,
-                                context,
-                                problem,
-                                layer,
-                                parent.zone,
-                                candidate,
-                                &parent.anchors,
-                                candidate_slot,
+                                inputs,
+                                ContinuationCandidate {
+                                    layer,
+                                    previous_zone: parent.zone,
+                                    destination: candidate,
+                                    prefix_anchors: &parent.anchors,
+                                    anchor_slot: candidate_slot,
+                                },
                                 &backward.nodes,
                                 &suffix_frontier
                                     [..suffix_frontier.len().min(continuation_state_limit)],
-                                parameters,
                                 local_scores,
                             )
                         });
@@ -489,7 +485,7 @@ fn forward_beam(
         let retained = retain_pair_alternatives(
             &scores,
             &pairs,
-            (parameters.n_draws as usize).min(beam_width),
+            (inputs.options.result_limit as usize).min(beam_width),
         );
         let children = retained
             .iter()
@@ -527,45 +523,45 @@ fn forward_beam(
 /// Add a small set of suffix boundary states proposed from the retained forward
 /// frontier. The original backward frontier remains intact: this is a bounded
 /// F-to-B seam refresh, not a replacement of reverse candidate generation.
-fn best_refresh_suffix(
-    inputs: &SearchInputs<'_>,
-    local_scores: &mut LocalScoreCache,
-    prefix_anchors: &[Option<usize>],
+struct RefreshSuffixRequest<'a> {
+    prefix_anchors: &'a [Option<usize>],
     candidate_slot: Option<usize>,
     candidate: usize,
     refresh_layer: usize,
-    downstream: &[usize],
-    messages: &BackwardMessages,
+    downstream: &'a [usize],
+    messages: &'a BackwardMessages,
+}
+
+fn best_refresh_suffix(
+    inputs: &SearchInputs<'_>,
+    local_scores: &mut LocalScoreCache,
+    request: RefreshSuffixRequest<'_>,
     unanchored_values: &mut HashMap<usize, Option<(usize, f64, f64)>>,
 ) -> Option<(usize, f64, f64)> {
     if inputs.anchor_slots.is_empty() {
-        if let Some(value) = unanchored_values.get(&candidate) {
+        if let Some(value) = unanchored_values.get(&request.candidate) {
             return *value;
         }
     }
     let mut best = None;
-    for &next_index in downstream {
-        let next = &messages.nodes[next_index];
+    for &next_index in request.downstream {
+        let next = &request.messages.nodes[next_index];
         if !inputs.anchor_slots.is_empty()
             && !candidate_anchors_compatible(
-                prefix_anchors,
+                request.prefix_anchors,
                 &next.anchors,
-                candidate_slot,
-                candidate,
+                request.candidate_slot,
+                request.candidate,
             )
         {
             continue;
         }
         let Some(local_score) = local_scores.score(
-            inputs.graph,
-            inputs.destinations,
-            inputs.context,
-            &inputs.problem,
-            refresh_layer + 1,
-            candidate,
+            inputs.scoring(),
+            request.refresh_layer + 1,
+            request.candidate,
             next.zone,
-            next.next.map(|index| messages.nodes[index].zone),
-            inputs.parameters,
+            next.next.map(|index| request.messages.nodes[index].zone),
         ) else {
             continue;
         };
@@ -575,7 +571,7 @@ fn best_refresh_suffix(
         }
     }
     if inputs.anchor_slots.is_empty() {
-        unanchored_values.insert(candidate, best);
+        unanchored_values.insert(request.candidate, best);
     }
     best
 }
@@ -591,8 +587,6 @@ fn refresh_stitch_frontier(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let problem = &inputs.problem;
-    let parameters = inputs.parameters;
     let candidate_count = inputs.options.proposal_limit_per_source;
     let refresh_per_prefix = inputs.options.seam_refresh_per_prefix;
     let anchor_slots = &inputs.anchor_slots;
@@ -600,12 +594,19 @@ fn refresh_stitch_frontier(
     let candidate_cache = &mut scratch.candidate_cache;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
+    let candidate_inputs = CandidateInputs {
+        graph,
+        destinations,
+        context,
+        candidate_count,
+        exploration_seed: inputs.options.exploration_seed,
+    };
     if refresh_per_prefix == 0 {
         return Ok(());
     }
     let refresh_layer = stitch_layer + 1;
     if refresh_layer + 1 >= context.steps.len() {
-        // The stitch suffix is the fixed terminal home, so there is no
+        // The stitch suffix is the fixed terminal destination, so there is no
         // activity destination to refresh.
         return Ok(());
     }
@@ -632,29 +633,29 @@ fn refresh_stitch_frontier(
             .and_then(|anchor| anchor_slots.get(&anchor).copied());
         let mut ranked = Vec::new();
         for candidate in candidates(
-            graph,
-            destinations,
-            context,
-            refresh_layer,
-            prefix.zone,
-            false,
-            state_index,
-            candidate_count,
-            parameters.seed,
+            candidate_inputs,
+            CandidateQuery {
+                layer: refresh_layer,
+                reference_zone: prefix.zone,
+                reverse: false,
+                state_index,
+                anchor_slot: candidate_slot,
+                anchors: &prefix.anchors,
+            },
             candidate_cache,
-            candidate_slot,
-            &prefix.anchors,
         )? {
             report.seam_refresh_proposals += 1;
             let best = best_refresh_suffix(
                 inputs,
                 local_scores,
-                &prefix.anchors,
-                candidate_slot,
-                candidate,
-                refresh_layer,
-                &downstream,
-                messages,
+                RefreshSuffixRequest {
+                    prefix_anchors: &prefix.anchors,
+                    candidate_slot,
+                    candidate,
+                    refresh_layer,
+                    downstream: &downstream,
+                    messages,
+                },
                 &mut unanchored_suffix_values,
             );
             let Some((next_index, local_score, suffix_score)) = best else {
@@ -666,15 +667,11 @@ fn refresh_stitch_frontier(
                 prefix_nodes[prefix.parent.expect("non-root stitch prefix")].zone
             };
             let Some(boundary_score) = local_scores.score(
-                graph,
-                destinations,
-                context,
-                problem,
+                inputs.scoring(),
                 stitch_layer,
                 prefix_previous,
                 prefix.zone,
                 Some(candidate),
-                parameters,
             ) else {
                 continue;
             };
@@ -733,8 +730,6 @@ fn backward_beam(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let problem = &inputs.problem;
-    let parameters = inputs.parameters;
     let beam_width = inputs.options.frontier_width;
     let candidate_count = inputs.options.proposal_limit_per_source;
     let anchor_slots = &inputs.anchor_slots;
@@ -742,11 +737,18 @@ fn backward_beam(
     let candidate_cache = &mut scratch.candidate_cache;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
+    let candidate_inputs = CandidateInputs {
+        graph,
+        destinations,
+        context,
+        candidate_count,
+        exploration_seed: inputs.options.exploration_seed,
+    };
     let started = profile.then(Instant::now);
     let terminal = context.steps.last().expect("context has steps");
     let terminal_zone = terminal.fixed_destination.ok_or_else(|| {
         SamplerError::InvalidInput(format!(
-            "context {} needs a fixed terminal home for bidirectional top-K search",
+            "context {} needs a fixed terminal destination for bidirectional top-K search",
             context.context_id
         ))
     })?;
@@ -768,32 +770,26 @@ fn backward_beam(
             let next = &nodes[next_index];
             let next_zone = next.zone;
             for candidate in candidates(
-                graph,
-                destinations,
-                context,
-                layer,
-                next_zone,
-                true,
-                state_index,
-                candidate_count,
-                parameters.seed,
+                candidate_inputs,
+                CandidateQuery {
+                    layer,
+                    reference_zone: next_zone,
+                    reverse: true,
+                    state_index,
+                    anchor_slot: context.steps[layer]
+                        .anchor_id
+                        .and_then(|anchor| anchor_slots.get(&anchor).copied()),
+                    anchors: &next.anchors,
+                },
                 candidate_cache,
-                context.steps[layer]
-                    .anchor_id
-                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
-                &next.anchors,
             )? {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
-                    graph,
-                    destinations,
-                    context,
-                    problem,
+                    inputs.scoring(),
                     layer + 1,
                     candidate,
                     next_zone,
                     next.next.map(|index| nodes[index].zone),
-                    parameters,
                 );
                 if let Some(score) = score {
                     children.push((next_index, candidate, score));
@@ -809,7 +805,7 @@ fn backward_beam(
         let retained = retain_pair_alternatives(
             &scores,
             &pairs,
-            (parameters.n_draws as usize).min(beam_width),
+            (inputs.options.result_limit as usize).min(beam_width),
         );
         let children = retained
             .iter()
@@ -858,8 +854,6 @@ fn extend_backward_guidance(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let problem = &inputs.problem;
-    let parameters = inputs.parameters;
     let guidance_width = inputs.options.continuation_state_limit;
     let candidate_count = inputs.options.proposal_limit_per_source;
     let anchor_slots = &inputs.anchor_slots;
@@ -867,6 +861,13 @@ fn extend_backward_guidance(
     let candidate_cache = &mut scratch.candidate_cache;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
+    let candidate_inputs = CandidateInputs {
+        graph,
+        destinations,
+        context,
+        candidate_count,
+        exploration_seed: inputs.options.exploration_seed,
+    };
     let started = profile.then(Instant::now);
     let mut frontier = messages.frontiers[stitch_layer + 1]
         .iter()
@@ -882,32 +883,26 @@ fn extend_backward_guidance(
             let next = &messages.nodes[next_index];
             let next_zone = next.zone;
             for candidate in candidates(
-                graph,
-                destinations,
-                context,
-                layer,
-                next_zone,
-                true,
-                state_index,
-                candidate_count,
-                parameters.seed,
+                candidate_inputs,
+                CandidateQuery {
+                    layer,
+                    reference_zone: next_zone,
+                    reverse: true,
+                    state_index,
+                    anchor_slot: context.steps[layer]
+                        .anchor_id
+                        .and_then(|anchor| anchor_slots.get(&anchor).copied()),
+                    anchors: &next.anchors,
+                },
                 candidate_cache,
-                context.steps[layer]
-                    .anchor_id
-                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
-                &next.anchors,
             )? {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
-                    graph,
-                    destinations,
-                    context,
-                    problem,
+                    inputs.scoring(),
                     layer + 1,
                     candidate,
                     next_zone,
                     next.next.map(|index| messages.nodes[index].zone),
-                    parameters,
                 );
                 if let Some(score) = score {
                     children.push((next_index, candidate, score));
@@ -923,7 +918,7 @@ fn extend_backward_guidance(
         let retained = retain_pair_alternatives(
             &scores,
             &pairs,
-            (parameters.n_draws as usize).min(guidance_width),
+            (inputs.options.result_limit as usize).min(guidance_width),
         );
         let children = retained
             .iter()
@@ -986,19 +981,8 @@ struct CompletedPlan {
     suffix: usize,
 }
 
-fn append_plan(
-    output: &mut OutputTable,
-    graph: &OdGraph,
-    destinations: &DestinationIndex,
-    context: &Context,
-    problem: &crate::ternary_reference::ReferenceProblem<'_>,
-    zones: &[usize],
-    parameters: Parameters,
-    draw_id: u32,
-) {
-    let Some((_, local_weights)) =
-        score_zones(graph, destinations, context, problem, zones, parameters)
-    else {
+fn append_plan(output: &mut OutputTable, inputs: &SearchInputs<'_>, zones: &[usize], draw_id: u32) {
+    let Some((_, local_weights)) = score_zones(inputs.scoring(), zones) else {
         return;
     };
     let mut suffixes = vec![0.0; zones.len()];
@@ -1007,14 +991,14 @@ fn append_plan(
         suffix += local_weights[layer];
         suffixes[layer] = suffix;
     }
-    let mut origin = graph.zone_index[&context.initial_zone];
+    let mut origin = inputs.graph.zone_index[&inputs.context.initial_zone];
     for (layer, &destination) in zones.iter().enumerate() {
         output.push(OutputRow {
-            context_id: context.context_id,
+            context_id: inputs.context.context_id,
             draw_id,
             layer: layer as u32,
-            origin: graph.zone_ids[origin],
-            destination: graph.zone_ids[destination],
+            origin: inputs.graph.zone_ids[origin],
+            destination: inputs.graph.zone_ids[destination],
             local_log_weight: local_weights[layer],
             total_log_weight: suffixes[layer],
         });
@@ -1085,29 +1069,21 @@ fn search_context(
             let boundary_score = scratch
                 .local_scores
                 .score(
-                    inputs.graph,
-                    inputs.destinations,
-                    inputs.context,
-                    &inputs.problem,
+                    inputs.scoring(),
                     stitch_layer,
                     prefix_previous,
                     prefix.zone,
                     Some(suffix.zone),
-                    inputs.parameters,
                 )
                 .and_then(|left| {
                     scratch
                         .local_scores
                         .score(
-                            inputs.graph,
-                            inputs.destinations,
-                            inputs.context,
-                            &inputs.problem,
+                            inputs.scoring(),
                             stitch_layer + 1,
                             prefix.zone,
                             suffix.zone,
                             suffix.next.map(|index| backward.nodes[index].zone),
-                            inputs.parameters,
                         )
                         .map(|right| left + right)
                 });
@@ -1148,17 +1124,8 @@ fn search_context(
         if !seen.insert(zones.clone()) {
             continue;
         }
-        append_plan(
-            &mut output,
-            inputs.graph,
-            inputs.destinations,
-            inputs.context,
-            &inputs.problem,
-            &zones,
-            inputs.parameters,
-            seen.len() as u32,
-        );
-        if seen.len() == inputs.parameters.n_draws as usize {
+        append_plan(&mut output, &inputs, &zones, seen.len() as u32);
+        if seen.len() == inputs.options.result_limit as usize {
             break;
         }
     }

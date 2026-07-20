@@ -12,17 +12,35 @@ pub(super) struct CandidateCache {
     reverse_projection: HashMap<(usize, usize), Vec<usize>>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CandidateInputs<'a> {
+    pub graph: &'a OdGraph,
+    pub destinations: &'a DestinationIndex,
+    pub context: &'a Context,
+    pub candidate_count: usize,
+    pub exploration_seed: u64,
+}
+
+pub(super) struct CandidateQuery<'a> {
+    pub layer: usize,
+    pub reference_zone: usize,
+    pub reverse: bool,
+    pub state_index: usize,
+    pub anchor_slot: Option<usize>,
+    pub anchors: &'a [Option<usize>],
+}
+
 fn exploration_index(
     seed: u64,
     context_id: u64,
-    particle: usize,
+    state_index: usize,
     layer: usize,
     draw: u64,
     len: usize,
 ) -> usize {
     let mut value = seed
         ^ context_id.wrapping_mul(0x9E3779B97F4A7C15)
-        ^ (particle as u64).wrapping_mul(0xBF58476D1CE4E5B9)
+        ^ (state_index as u64).wrapping_mul(0xBF58476D1CE4E5B9)
         ^ (layer as u64).wrapping_mul(0x94D049BB133111EB)
         ^ draw.wrapping_mul(0xD6E8FEB86659FD93);
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -82,54 +100,47 @@ fn base_candidates(
 }
 
 pub(super) fn candidates(
-    graph: &OdGraph,
-    destinations: &DestinationIndex,
-    context: &Context,
-    layer: usize,
-    reference_zone: usize,
-    reverse: bool,
-    state_index: usize,
-    candidate_count: usize,
-    seed: u64,
+    inputs: CandidateInputs<'_>,
+    query: CandidateQuery<'_>,
     cache: &mut CandidateCache,
-    anchor_slot: Option<usize>,
-    anchors: &[Option<usize>],
 ) -> Result<Vec<usize>, SamplerError> {
-    let step = context.steps[layer];
-    if let Some(zone) = anchor_slot.and_then(|slot| anchors[slot]) {
+    let step = inputs.context.steps[query.layer];
+    if let Some(zone) = query.anchor_slot.and_then(|slot| query.anchors[slot]) {
         return Ok(vec![zone]);
     }
-    let key = (layer, reference_zone, reverse);
+    let key = (query.layer, query.reference_zone, query.reverse);
     let base = if let Some(base) = cache.base.get(&key) {
         base
     } else {
         let base = base_candidates(
-            graph,
-            destinations,
-            context,
-            layer,
-            reference_zone,
-            reverse,
-            candidate_count,
+            inputs.graph,
+            inputs.destinations,
+            inputs.context,
+            query.layer,
+            query.reference_zone,
+            query.reverse,
+            inputs.candidate_count,
         )?;
         cache.base.entry(key).or_insert(base)
     };
     if step.fixed_destination.is_some() {
         return Ok(base.clone());
     }
-    let domain = destinations
-        .domain(step.activity_id)
-        .ok_or(SamplerError::NoFeasibleSequence {
-            context_id: context.context_id,
-            origin: context.initial_zone,
-        })?;
+    let domain =
+        inputs
+            .destinations
+            .domain(step.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: inputs.context.context_id,
+                origin: inputs.context.initial_zone,
+            })?;
     let mut result = base.clone();
     for draw in 0..2 {
         let exploration = domain[exploration_index(
-            seed,
-            context.context_id,
-            state_index,
-            layer,
+            inputs.exploration_seed,
+            inputs.context.context_id,
+            query.state_index,
+            query.layer,
             draw,
             domain.len(),
         )];

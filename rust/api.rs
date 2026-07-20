@@ -6,8 +6,8 @@ use crate::common::Parameters;
 use crate::errors::SamplerError;
 use crate::input::{parse_destination_inputs, parse_od_costs, parse_reference_contexts};
 use crate::model::{DestinationIndex, OdGraph};
+use crate::oracle::{search_reference_top_k, HeapSearchReport};
 use crate::output::to_polars_dataframe;
-use crate::ternary_reference::{search_reference_top_k, HeapSearchReport};
 
 /// Active deterministic destination-plan search.
 ///
@@ -60,7 +60,8 @@ impl DestinationPlanSearch {
         skip_infeasible: bool,
         collect_profile: bool,
     ) -> PyResult<PyObject> {
-        validate_parameters(logit_scale, top_k)?;
+        validate_logit_scale(logit_scale)?;
+        validate_top_k(top_k as usize)?;
         if frontier_width == 0
             || proposal_limit_per_source == 0
             || continuation_state_limit == 0
@@ -76,8 +77,6 @@ impl DestinationPlanSearch {
             logit_scale,
             update_plan_timings,
             use_shadow_prices,
-            seed: exploration_seed,
-            n_draws: top_k,
             skip_infeasible,
         };
         let (output, report) = py.allow_threads(|| {
@@ -87,6 +86,8 @@ impl DestinationPlanSearch {
                 &contexts,
                 parameters,
                 TopKOptions {
+                    exploration_seed,
+                    result_limit: top_k,
                     frontier_width,
                     proposal_limit_per_source,
                     stitch_bias,
@@ -124,7 +125,7 @@ impl DestinationPlanSearch {
         n_threads: Option<usize>,
         skip_infeasible: bool,
     ) -> PyResult<PyObject> {
-        validate_parameters(logit_scale, 1)?;
+        validate_logit_scale(logit_scale)?;
         if top_k == 0 || max_states == 0 {
             return Err(SamplerError::InvalidInput(
                 "top_k and max_states must be positive".to_string(),
@@ -136,8 +137,6 @@ impl DestinationPlanSearch {
             logit_scale,
             update_plan_timings,
             use_shadow_prices,
-            seed: 0,
-            n_draws: 1,
             skip_infeasible,
         };
         let (output, report) = py.allow_threads(|| {
@@ -224,15 +223,19 @@ fn heap_report_to_dict(py: Python<'_>, report: &HeapSearchReport) -> PyResult<Py
     Ok(result.into())
 }
 
-fn validate_parameters(logit_scale: f64, n_draws: u32) -> Result<(), SamplerError> {
+fn validate_logit_scale(logit_scale: f64) -> Result<(), SamplerError> {
     if !logit_scale.is_finite() || logit_scale <= 0.0 {
         return Err(SamplerError::InvalidInput(
             "logit_scale must be finite and positive".to_string(),
         ));
     }
-    if n_draws == 0 {
+    Ok(())
+}
+
+fn validate_top_k(top_k: usize) -> Result<(), SamplerError> {
+    if top_k == 0 {
         return Err(SamplerError::InvalidInput(
-            "n_draws must be positive".to_string(),
+            "top_k must be positive".to_string(),
         ));
     }
     Ok(())
