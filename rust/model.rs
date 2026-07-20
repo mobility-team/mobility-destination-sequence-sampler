@@ -165,11 +165,6 @@ impl OdGraph {
     }
 
     #[inline]
-    pub fn outgoing_len(&self, origin: usize) -> usize {
-        self.offsets[origin + 1] - self.offsets[origin]
-    }
-
-    #[inline]
     pub fn outgoing_by_cost(&self, origin: usize) -> impl Iterator<Item = Edge> + '_ {
         self.outgoing_cost_edge_indices[self.offsets[origin]..self.offsets[origin + 1]]
             .iter()

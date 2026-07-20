@@ -45,20 +45,6 @@ class DestinationPlanSearch:
 class ExperimentalDestinationSampler:
     def __init__(self, *, od_costs: Any, destination_inputs: Any) -> None: ...
 
-    def sample(
-        self,
-        *,
-        steps: Any,
-        initial_locations: Any,
-        logit_scale: float,
-        update_plan_timings: bool,
-        use_shadow_prices: bool,
-        seed: int,
-        n_draws: int = 1,
-        n_threads: int | None = None,
-        skip_infeasible: bool = False,
-    ) -> Any: ...
-
     def sample_ternary_reference(
         self,
         *,
@@ -120,18 +106,3 @@ class ExperimentalDestinationSampler:
         n_threads: int | None = None,
         skip_infeasible: bool = False,
     ) -> tuple[Any, dict[str, int | str]]: ...
-
-def sample_destination_sequences(
-    *,
-    steps: Any,
-    initial_locations: Any,
-    od_costs: Any,
-    destination_inputs: Any,
-    logit_scale: float,
-    update_plan_timings: bool,
-    use_shadow_prices: bool,
-    seed: int,
-    n_draws: int = 1,
-    n_threads: int | None = None,
-    skip_infeasible: bool = False,
-) -> Any: ...

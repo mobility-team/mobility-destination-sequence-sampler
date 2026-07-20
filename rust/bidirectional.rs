@@ -11,11 +11,11 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
+use crate::common::{fixed_destination_value, Parameters};
 use crate::errors::SamplerError;
 use crate::input::Context;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
-use crate::sampler::{fixed_destination_value, Parameters};
 use crate::ternary_reference::{build_problem, score_local_weight, score_zones, ReferenceProblem};
 
 mod candidates;

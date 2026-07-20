@@ -12,11 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rayon::prelude::*;
 
+use crate::common::{alternative_gumbel, fixed_destination_value, Parameters};
 use crate::errors::SamplerError;
 use crate::input::Context;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
-use crate::sampler::{alternative_gumbel, fixed_destination_value, Parameters};
 use crate::ternary_reference::{
     activity_log_weight, adjusted_times, build_problem, score_zones, ReferenceProblem,
 };

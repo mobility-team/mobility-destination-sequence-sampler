@@ -3,11 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use rayon::prelude::*;
 
+use crate::common::{alternative_gumbel, fixed_destination_value, logaddexp, Parameters};
 use crate::errors::SamplerError;
 use crate::input::{Context, Step};
 use crate::model::{DestinationIndex, DestinationValue, Edge, OdGraph};
 use crate::output::{OutputRow, OutputTable};
-use crate::sampler::{alternative_gumbel, fixed_destination_value, logaddexp, Parameters};
 
 const MIN_ACTIVITY_DURATION_HOURS: f64 = 1e-3;
 

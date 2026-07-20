@@ -25,6 +25,7 @@ while 3,000 separate one-draw contexts took 29.265 s.
 Reuse the prepared graph and destination index, deduplicate structurally
 identical contexts, and request several draws together. This is a baseline
 result for the historical sampler, not a performance claim for active top-K.
+The implementation and harness were archived at `research-archive-2026-07-21`.
 
 ## Decision
 
@@ -34,5 +35,5 @@ choose active top-K parameters.
 ## Reproduce
 
 ```powershell
-mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_synthetic_case --n-zones 1110 --out-degree 965 --n-contexts 1000 --n-layers 6 --n-draws 3
+git show research-archive-2026-07-21:experiments/benchmarks/perf_synthetic_case.py
 ```

@@ -2,15 +2,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
 
 use crate::bidirectional::{search_bidirectional_top_k_all, BidirectionalTopKReport, TopKOptions};
+use crate::common::Parameters;
 use crate::errors::SamplerError;
-use crate::input::{
-    parse_contexts, parse_destination_inputs, parse_od_costs, parse_reference_contexts,
-};
+use crate::input::{parse_destination_inputs, parse_od_costs, parse_reference_contexts};
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::to_polars_dataframe;
 use crate::particle::{sample_particles_all, ParticleReport};
-use crate::profile::ProfileReport;
-use crate::sampler::{sample_all, sample_all_with_profile, IterationCache, Parameters};
 use crate::ternary_reference::{sample_reference_all, search_reference_top_k, HeapSearchReport};
 
 /// Historical research surface retained for the experiment scripts.
@@ -21,7 +18,6 @@ use crate::ternary_reference::{sample_reference_all, search_reference_top_k, Hea
 pub struct ExperimentalDestinationSampler {
     graph: OdGraph,
     destination_index: DestinationIndex,
-    cache: IterationCache,
 }
 
 #[pymethods]
@@ -38,88 +34,7 @@ impl ExperimentalDestinationSampler {
         Ok(Self {
             graph,
             destination_index,
-            cache: IterationCache::default(),
         })
-    }
-
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, seed, n_draws=1, n_threads=None, skip_infeasible=false))]
-    #[allow(clippy::too_many_arguments)]
-    fn sample(
-        &self,
-        py: Python<'_>,
-        steps: &Bound<'_, PyAny>,
-        initial_locations: &Bound<'_, PyAny>,
-        logit_scale: f64,
-        update_plan_timings: bool,
-        use_shadow_prices: bool,
-        seed: u64,
-        n_draws: u32,
-        n_threads: Option<usize>,
-        skip_infeasible: bool,
-    ) -> PyResult<PyObject> {
-        validate_parameters(logit_scale, n_draws)?;
-        let contexts = parse_contexts(steps, initial_locations)?;
-        let parameters = Parameters {
-            logit_scale,
-            update_plan_timings,
-            use_shadow_prices,
-            seed,
-            n_draws,
-            skip_infeasible,
-        };
-        let output = py.allow_threads(|| {
-            sample_all(
-                &self.graph,
-                &self.destination_index,
-                &self.cache,
-                &contexts,
-                parameters,
-                n_threads,
-            )
-        })?;
-        to_polars_dataframe(py, output)
-    }
-
-    /// Run the same sampler and return aggregate phase timings and workload
-    /// counts. Profiling is explicit so normal model runs keep the lean path.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, seed, n_draws=1, n_threads=None, skip_infeasible=false))]
-    #[allow(clippy::too_many_arguments)]
-    fn sample_with_profile(
-        &self,
-        py: Python<'_>,
-        steps: &Bound<'_, PyAny>,
-        initial_locations: &Bound<'_, PyAny>,
-        logit_scale: f64,
-        update_plan_timings: bool,
-        use_shadow_prices: bool,
-        seed: u64,
-        n_draws: u32,
-        n_threads: Option<usize>,
-        skip_infeasible: bool,
-    ) -> PyResult<PyObject> {
-        validate_parameters(logit_scale, n_draws)?;
-        let contexts = parse_contexts(steps, initial_locations)?;
-        let parameters = Parameters {
-            logit_scale,
-            update_plan_timings,
-            use_shadow_prices,
-            seed,
-            n_draws,
-            skip_infeasible,
-        };
-        let (output, profile) = py.allow_threads(|| {
-            sample_all_with_profile(
-                &self.graph,
-                &self.destination_index,
-                &self.cache,
-                &contexts,
-                parameters,
-                n_threads,
-            )
-        })?;
-        let output = to_polars_dataframe(py, output)?;
-        let profile = profile_to_dict(py, &profile)?;
-        Ok(PyTuple::new(py, [output, profile])?.into())
     }
 
     /// Enumerate complete destination assignments and score the exact
@@ -641,47 +556,6 @@ fn heap_report_to_dict(py: Python<'_>, report: &HeapSearchReport) -> PyResult<Py
     Ok(result.into())
 }
 
-fn profile_to_dict(py: Python<'_>, profile: &ProfileReport) -> PyResult<PyObject> {
-    let result = PyDict::new(py);
-    result.set_item("plan_build_seconds", profile.plan_build.as_secs_f64())?;
-    result.set_item("sampling_wall_seconds", profile.sampling_wall.as_secs_f64())?;
-    result.set_item("output_merge_seconds", profile.output_merge.as_secs_f64())?;
-    result.set_item("context_cpu_seconds", profile.context_cpu.as_secs_f64())?;
-    result.set_item("anchor_cpu_seconds", profile.anchor_cpu.as_secs_f64())?;
-    result.set_item("tree_cpu_seconds", profile.tree_cpu.as_secs_f64())?;
-    result.set_item(
-        "tree_problem_build_cpu_seconds",
-        profile.tree_problem_build_cpu.as_secs_f64(),
-    )?;
-    result.set_item(
-        "tree_structure_build_cpu_seconds",
-        profile.tree_structure_build_cpu.as_secs_f64(),
-    )?;
-    result.set_item(
-        "tree_backward_cpu_seconds",
-        profile.tree_backward_cpu.as_secs_f64(),
-    )?;
-    result.set_item(
-        "tree_forward_cpu_seconds",
-        profile.tree_forward_cpu.as_secs_f64(),
-    )?;
-    result.set_item("contexts", profile.contexts)?;
-    result.set_item("anchor_contexts", profile.anchor_contexts)?;
-    result.set_item("tree_contexts", profile.tree_contexts)?;
-    result.set_item("successful_contexts", profile.successful_contexts)?;
-    result.set_item("infeasible_contexts", profile.infeasible_contexts)?;
-    result.set_item("cyclic_contexts", profile.cyclic_contexts)?;
-    result.set_item("input_steps", profile.input_steps)?;
-    result.set_item("output_rows", profile.output_rows)?;
-    result.set_item("variables", profile.variables)?;
-    result.set_item("pair_factors", profile.pair_factors)?;
-    result.set_item("pair_transitions", profile.pair_transitions)?;
-    result.set_item("domain_choices", profile.domain_choices)?;
-    result.set_item("outgoing_messages", profile.outgoing_messages)?;
-    result.set_item("message_edges", profile.message_edges)?;
-    Ok(result.into())
-}
-
 fn validate_parameters(logit_scale: f64, n_draws: u32) -> Result<(), SamplerError> {
     if !logit_scale.is_finite() || logit_scale <= 0.0 {
         return Err(SamplerError::InvalidInput(
@@ -696,57 +570,8 @@ fn validate_parameters(logit_scale: f64, n_draws: u32) -> Result<(), SamplerErro
     Ok(())
 }
 
-/// Compute exact backward destination values and sample complete chains forward.
-#[pyfunction]
-#[pyo3(signature = (*, steps, initial_locations, od_costs, destination_inputs, logit_scale, update_plan_timings, use_shadow_prices, seed, n_draws=1, n_threads=None, skip_infeasible=false))]
-#[allow(clippy::too_many_arguments)]
-pub fn sample_destination_sequences(
-    py: Python<'_>,
-    steps: &Bound<'_, PyAny>,
-    initial_locations: &Bound<'_, PyAny>,
-    od_costs: &Bound<'_, PyAny>,
-    destination_inputs: &Bound<'_, PyAny>,
-    logit_scale: f64,
-    update_plan_timings: bool,
-    use_shadow_prices: bool,
-    seed: u64,
-    n_draws: u32,
-    n_threads: Option<usize>,
-    skip_infeasible: bool,
-) -> PyResult<PyObject> {
-    validate_parameters(logit_scale, n_draws)?;
-
-    // Python prepares four compact tables. Rust converts them once, then all
-    // backward and forward work runs without DataFrame joins or Python calls.
-    let graph = OdGraph::build(parse_od_costs(od_costs)?)?;
-    let destination_index =
-        DestinationIndex::build(parse_destination_inputs(destination_inputs)?, &graph)?;
-    let contexts = parse_contexts(steps, initial_locations)?;
-    let parameters = Parameters {
-        logit_scale,
-        update_plan_timings,
-        use_shadow_prices,
-        seed,
-        n_draws,
-        skip_infeasible,
-    };
-    let cache = IterationCache::default();
-    let output = py.allow_threads(|| {
-        sample_all(
-            &graph,
-            &destination_index,
-            &cache,
-            &contexts,
-            parameters,
-            n_threads,
-        )
-    })?;
-    to_polars_dataframe(py, output)
-}
-
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<DestinationPlanSearch>()?;
     module.add_class::<ExperimentalDestinationSampler>()?;
-    module.add_function(wrap_pyfunction!(sample_destination_sequences, module)?)?;
     Ok(())
 }
