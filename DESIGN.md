@@ -1,51 +1,46 @@
 # Kernel contract
 
-Read this only for API, scoring, or search changes. Current hypotheses and
-measurements are under `experiments/`.
-
 ## Boundary
 
-- Python supplies Polars tables and orchestrates Mobility.
-- Rust owns indexed inputs, feasibility, scoring, continuation/search, and all
-  hot loops. No Polars in Rust search loops.
-- Reuse one `DestinationPlanSearch` per OD/destination iteration.
-
-Required inputs:
+Python supplies prepared Polars tables; Rust owns indexes, feasibility,
+scoring, and hot loops. Reuse one `DestinationPlanSearch` per OD/destination
+iteration. The public methods are `top_k()` (bounded) and `exact_top_k()`
+(proof oracle).
 
 ```text
-OD:           origin, destination, cost, time
-destination:  activity_id, destination, opportunity_capacity,
-              country_value_coefficient, saturation_utility, shadow_price
-steps:        context_id, layer, activity_id, anchor_id, fixed_destination,
-              departure_time, next_departure_time, duration_per_person,
-              value_of_time, mean_duration_per_person, min_activity_time
-initial:      context_id, initial_zone
+OD:          origin, destination, cost, time
+destination: activity_id, destination, opportunity_capacity,
+             country_value_coefficient, saturation_utility, shadow_price
+steps:       context_id, layer, activity_id, anchor_id, fixed_destination,
+             departure_time, next_departure_time, duration_per_person,
+             value_of_time, mean_duration_per_person, min_activity_time,
+             arrival_time, arrival_time_rigidity, departure_time_rigidity
+initial:     context_id, initial_zone
 ```
 
-The context key includes every recursion-affecting step/parameter. Repeated
-non-null `anchor_id`s share one destination; capacity applies once, while each
-visit still receives its activity/travel utility.
+Repeated non-null `anchor_id`s share one destination. Capacity applies once;
+each visit still receives activity/travel utility.
 
-## Active top-K
+## Active search
 
 ```text
-DestinationPlanSearch.top_k()
-  -> rust/api.rs -> search_bidirectional_top_k_all() -> search_context()
+api.rs -> search_bidirectional_top_k_all() -> search_context()
 ```
 
-- `rust/bidirectional.rs`: context state and backward/guidance/forward/refresh/stitch passes.
-- `rust/bidirectional/candidates.rs`: bounded proposal construction and cache.
-- New passes use `SearchInputs` + `SearchScratch`, not long parameter lists.
+- `bidirectional.rs`: frontiers, continuation guidance, refresh, stitch.
+- `bidirectional/candidates.rs`: bounded proposals and cache.
+- New passes take `SearchInputs` + `SearchScratch`, not long argument lists.
+- `ternary_reference.rs`: exact top-K oracle; it proves or fails at
+  `max_states`, never approximates.
 
-Correctness invariant:
+## Scoring invariant
 
 ```text
 prefix[i] owns factors through i - 1
 suffix[i] owns factors from i + 1 onward
 stitch[i] owns factors i and i + 1 exactly once
-factor i is destination[i - 1] -> destination[i] -> destination[i + 1]
+factor i = destination[i - 1] -> destination[i] -> destination[i + 1]
 ```
 
-F-to-B refresh may add states but must not evict the reverse/home-oriented
-frontier. `exact_top_k()` is the bounded small-context oracle; repeated-anchor
-cases may hit `max_states`.
+Forward-to-backward refresh may add activity-correct states but must not evict
+the reverse/home-oriented frontier.

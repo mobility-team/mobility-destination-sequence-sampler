@@ -1,27 +1,13 @@
-# Experiment index
+# Archived directions
 
-The active direction and retained reference directions are listed here. Only
-bounded bidirectional top-K is the active destination-sampling redesign.
-
-| Experiment | Status | Decision | Record |
-|---|---|---|---|
-| Bounded bidirectional top-K | Active | Continue with continuation-aware proposals. | [record](benchmarks/bidirectional-top-k.md) |
-| Particle candidates | Archived | Sequential comparison path; source is tagged. | [synthetic sampler](benchmarks/synthetic-sampler.md) |
-| Exact ternary reference | Oracle | Keep for validation and small-domain checks. | [exact references](benchmarks/exact-reference.md) |
-| Second-order aggregation | Archived | Not production-speed at raw resolution; source is tagged. | [record](analysis/second-order-recursion.md) |
-| Factor-tree sampler | Archived | Historical sampler; source is tagged. | [exact references](benchmarks/exact-reference.md) |
-| Hierarchical travel kernel | Archived | Useful research result, not a standalone runtime solution; source is tagged. | [record](analysis/hierarchical-kernel.md) |
-| Exact heap top-K | Oracle support | Keep as an exact quality oracle, not as the bounded sampler. | [exact references](benchmarks/exact-reference.md) |
-
-| Area | Implementation | Current interpretation |
+| Direction | Status | Decision |
 |---|---|---|
-| Particle candidates | `research-archive-2026-07-21` | Sequential comparison path; archived from the working tree. |
-| Exact ternary oracle | `rust/ternary_reference.rs` | Validation authority for small cases and top-K quality. |
-| Second-order aggregation | `research-archive-2026-07-21` | Exact reduced-resolution research path; not production-speed at raw resolution. |
-| Factor-tree sampler | `research-archive-2026-07-21` | Earlier exact structural approach; archived from the working tree. |
-| Hierarchical kernel | `research-archive-2026-07-21` | Spatial compression hypothesis; not a standalone route to target runtime. |
-| Heap top-K reference | `search_reference_top_k()` and related benchmarks | Exact oracle/search reference, not the bounded production direction. |
+| Particle candidates | Archived | Sequential baseline; does not fix top-K proposal support. |
+| Factor-tree/exhaustive sampling | Archived | Useful historical reference, too costly for active search. |
+| Second-order aggregation | Archived | Correct research path, not raw-zone speed. |
+| Hierarchical travel kernel | Archived | Compression result, not a standalone runtime solution. |
+| Exact heap top-K | Retained oracle | Keep for small-case validation only. |
 
-Every record states its objective, latest retained measurements, lesson, and
-decision. `../BENCHMARKS.md` intentionally contains only current active
-bounded-search measurements.
+Archived code and retired benchmark harnesses: `research-archive-2026-07-21`.
+The retained oracle is `rust/ternary_reference.rs`. Details and compact lessons
+are in [`lessons-learned.md`](lessons-learned.md).

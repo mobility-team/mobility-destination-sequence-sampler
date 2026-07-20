@@ -1,35 +1,30 @@
-# Agent operating guide
+# Agent guide
+
+## Scope
+
+Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
+`exact_top_k()` oracle. Retired paths are at `research-archive-2026-07-21`.
 
 ## Commands
 
 - Install: `mamba run -n mobility-destination-sequence-sampler python -m pip install -e .`
-- Release extension: `mamba run -n mobility-destination-sequence-sampler python -m maturin develop --release`
+- Release build: `mamba run -n mobility-destination-sequence-sampler python -m maturin develop --release`
 - Tests: `mamba run -n mobility-destination-sequence-sampler python -m pytest`
-- Experiments: run from the repository root as
-  `mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.<name>`.
 
-## Boundaries
+## Ownership and routing
 
-- Python prepares columnar inputs and owns Mobility orchestration.
-- Rust owns compact graph/index structures, feasibility, scoring, continuation
-  values, and bounded search. Do not introduce Polars into Rust hot loops.
-- Preserve the factor-ownership invariant in `DESIGN.md` when changing search.
+- Python prepares Polars inputs and orchestrates Mobility. Rust owns compact
+  indexes, feasibility, scoring, and search; no Polars in Rust hot loops.
+- Contract/invariants: `DESIGN.md`.
+- Active search: `rust/bidirectional.rs`; proposals/cache:
+  `rust/bidirectional/candidates.rs`.
+- Exact oracle: `rust/ternary_reference.rs`; Python boundary: `rust/api.rs`.
+- Current decision/measurements: `experiments/active-bidirectional-top-k.md`,
+  `BENCHMARKS.md`. Archive decisions: `experiments/historical.md`.
 
-## Routing: read only what the task needs
+## Change rule
 
-- Contract, schemas, kernel map: `DESIGN.md`.
-- Current top-K hypothesis and decision: `experiments/active-bidirectional-top-k.md`.
-- Retained measurements: `experiments/benchmarks/bidirectional-top-k.md`.
-- Historical/rejected approaches: `experiments/historical.md` and
-  `experiments/lessons-learned.md`.
-- API conversion and Python reports: `rust/api.rs`.
-- Active search orchestration: `rust/bidirectional.rs`.
-- Candidate proposals/cache: `rust/bidirectional/candidates.rs`.
-- Exact validation oracle: `rust/ternary_reference.rs`.
-
-## Iteration policy
-
-For an exploratory Rust change: release-build and run one focused test or
-analysis command. At a decision point: run the full suite, agreed oracle and
-  runtime samples, then update the active experiment record. Do not remove a
-  failed experiment until it has been audited.
+Preserve the factor-ownership invariant in `DESIGN.md`. For an exploratory
+Rust change, release-build plus one focused check; at a decision point, run
+the full suite and agreed oracle/runtime samples. Audit failed work before
+removing it, then record the conclusion briefly.
