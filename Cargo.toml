@@ -1,0 +1,20 @@
+[package]
+name = "mobility_destination_sequence_sampler"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "mobility_destination_sequence_sampler"
+crate-type = ["cdylib"]
+path = "rust/lib.rs"
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["abi3-py311"] }
+rayon = "1.10"
+thiserror = "2.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+

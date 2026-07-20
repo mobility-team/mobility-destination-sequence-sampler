@@ -1,0 +1,12 @@
+name: mobility-destination-sequence-sampler
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - maturin>=1.7,<2
+  - numpy>=2,<3
+  - pip
+  - polars>=1.39,<2
+  - psutil>=6,<8
+  - pytest>=8,<10
+  - scipy>=1.15,<2

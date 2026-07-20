@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "mobility-destination-sequence-sampler"
+version = "0.1.0"
+description = "Exact Rust backward-forward destination sequence sampler for Mobility"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Mobility Team" },
+]
+dependencies = [
+  "polars>=1.39,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "numpy>=2,<3",
+  "psutil>=6,<8",
+  "pytest>=8,<10",
+  "scipy>=1.15,<2",
+]
+
+[tool.maturin]
+python-source = "src"
+module-name = "mobility_destination_sequence_sampler._core"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
