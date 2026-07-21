@@ -1,6 +1,7 @@
 # Active: unbinned factor-map top-K
 
-`top_k()` defaults to `candidate_strategy="factor_map"`. It grows bounded
+`top_k()` defaults to `candidate_strategy="factor_map"` with
+`stitch_bias=1`. It grows bounded
 bidirectional frontiers, exact-scores retained plans, and stitches them
 exactly. Depth 2 is a direct scan; factor maps apply through depth 5; longer
 plans use the cheap heuristic.
@@ -15,10 +16,10 @@ are cached per context.
 ## Evidence (Grand Geneve, 2026-07-21)
 
 - Global stratified pilot, three contexts in each of 22 strata: weighted
-  `Mass@10` 0.767, versus factor-map depth 4 0.764, surface 0.735, and
+  `Mass@10` 0.794, versus the centred factor-map cut 0.767, surface 0.735, and
   heuristic 0.707. Oracle-certifiable coverage is 93.9% (44 contexts).
 - Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones,
-  eight threads: factor-map depth 5 15.323 s, 70,174 complete; inside 30 s.
+  eight threads: factor-map depth 5 22.534 s, 70,303 complete; inside 30 s.
 
 Rejected: one suffix collapses geographically (0.488 pilot); eight suffixes
 split the fixed candidate budget (0.745); 32 proposals per source add beam

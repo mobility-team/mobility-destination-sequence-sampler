@@ -67,13 +67,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
     parser.add_argument(
         "--candidate-strategy",
-        choices=("surface", "factor_map", "partial_map", "hybrid_map", "heuristic"),
+        choices=("surface", "factor_map", "heuristic"),
         default="factor_map",
         help="bounded proposal policy (default: factor_map)",
     )
     parser.add_argument("--surface-bins", type=int, choices=(2, 4), default=2)
     parser.add_argument("--factor-map-max-depth", type=int, default=5)
-    parser.add_argument("--stitch-bias", type=int, default=0)
+    parser.add_argument("--stitch-bias", type=int, default=1)
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
     parser.add_argument("--archetype-strata-limit", type=int, default=12)
