@@ -16,8 +16,8 @@ use crate::input::Context;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
 use crate::scoring::{
-    build_scoring_problem, fixed_destination_value, score_local_weight, score_zones, Parameters,
-    ScoringInputs, ScoringProblem,
+    build_scoring_problem, fixed_destination_value, score_inbound_partial, score_local_weight,
+    score_zones, Parameters, ScoringInputs, ScoringProblem,
 };
 
 mod candidates;
@@ -32,6 +32,7 @@ pub(crate) enum CandidateStrategy {
     Heuristic,
     Surface,
     FactorMap,
+    PartialScreen,
 }
 
 impl CandidateStrategy {
@@ -40,8 +41,10 @@ impl CandidateStrategy {
             "heuristic" => Ok(Self::Heuristic),
             "surface" => Ok(Self::Surface),
             "factor_map" => Ok(Self::FactorMap),
+            "partial_screen" => Ok(Self::PartialScreen),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'surface', 'factor_map', or 'heuristic'".to_string(),
+                "candidate_strategy must be 'surface', 'factor_map', 'partial_screen', or 'heuristic'"
+                    .to_string(),
             )),
         }
     }
@@ -86,6 +89,8 @@ struct FactorMapCache {
     previous: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
     current: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
     next: HashMap<(usize, usize, Option<usize>), Vec<Option<f64>>>,
+    partial_current: HashMap<(usize, usize), Vec<Option<f64>>>,
+    partial_next: HashMap<(usize, usize), Vec<Option<f64>>>,
 }
 
 impl LocalScoreCache {
@@ -506,6 +511,154 @@ fn factor_map_candidates(
     Ok(result)
 }
 
+/// Use maps whose terms are available from one leg to shortlist candidates,
+/// then apply the full ternary scorer only to that shortlist.  The partial
+/// terms never decide feasibility or a retained beam score.
+fn partial_screen_candidates(
+    inputs: &SearchInputs<'_>,
+    request: FactorMapRequest<'_>,
+    suffix_nodes: &[SuffixNode],
+    maps: &mut FactorMapCache,
+) -> Result<Vec<usize>, SamplerError> {
+    if let Some(zone) = request.anchor_slot.and_then(|slot| request.anchors[slot]) {
+        return Ok(vec![zone]);
+    }
+    let step = inputs.context.steps[request.layer];
+    if let Some(fixed) = step.fixed_destination {
+        return Ok(vec![inputs.graph.zone_index[&fixed]]);
+    }
+    let domain =
+        inputs
+            .destinations
+            .domain(step.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: inputs.context.context_id,
+                origin: inputs.context.initial_zone,
+            })?;
+    let zone_count = inputs.graph.zone_ids.len();
+    let initial_previous_map;
+    let previous_map = if let Some(previous_zone) = request.previous_zone {
+        maps.previous
+            .entry((request.layer - 1, previous_zone, request.origin))
+            .or_insert_with(|| {
+                let mut map = vec![None; zone_count];
+                for &destination in domain {
+                    map[destination] = score_local_weight(
+                        inputs.scoring(),
+                        request.layer - 1,
+                        previous_zone,
+                        request.origin,
+                        Some(destination),
+                    );
+                }
+                map
+            })
+    } else {
+        initial_previous_map =
+            domain
+                .iter()
+                .fold(vec![None; zone_count], |mut map, &destination| {
+                    map[destination] = initial_endpoint_score(
+                        inputs.graph,
+                        inputs.destinations,
+                        inputs.context,
+                        destination,
+                        inputs.parameters,
+                    )
+                    .map(|_| 0.0);
+                    map
+                });
+        &initial_previous_map
+    };
+    let current_partial = maps
+        .partial_current
+        .entry((request.layer, request.origin))
+        .or_insert_with(|| {
+            let mut map = vec![None; zone_count];
+            for &destination in domain {
+                map[destination] = score_inbound_partial(
+                    inputs.scoring(),
+                    request.layer,
+                    request.origin,
+                    destination,
+                );
+            }
+            map
+        });
+    let compare = |left: &(f64, usize), right: &(f64, usize)| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+    };
+    let screen_limit = request.candidate_limit.saturating_mul(8);
+    let mut result = Vec::with_capacity(request.candidate_limit * request.suffixes.len());
+    for &suffix_index in request.suffixes {
+        let suffix = &suffix_nodes[suffix_index];
+        let next_zone = suffix.zone;
+        let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
+        let next_partial = maps
+            .partial_next
+            .entry((request.layer + 1, next_zone))
+            .or_insert_with(|| {
+                let mut map = vec![None; zone_count];
+                for &destination in domain {
+                    map[destination] = score_inbound_partial(
+                        inputs.scoring(),
+                        request.layer + 1,
+                        destination,
+                        next_zone,
+                    );
+                }
+                map
+            });
+        let mut screened = domain
+            .iter()
+            .filter_map(|&destination| {
+                Some((
+                    previous_map[destination]?
+                        + current_partial[destination]?
+                        + next_partial[destination]?,
+                    destination,
+                ))
+            })
+            .collect::<Vec<_>>();
+        if screened.len() > screen_limit {
+            screened.select_nth_unstable_by(screen_limit - 1, compare);
+            screened.truncate(screen_limit);
+        }
+        let mut ranked = screened
+            .into_iter()
+            .filter_map(|(_, destination)| {
+                Some((
+                    previous_map[destination]?
+                        + score_local_weight(
+                            inputs.scoring(),
+                            request.layer,
+                            request.origin,
+                            destination,
+                            Some(next_zone),
+                        )?
+                        + score_local_weight(
+                            inputs.scoring(),
+                            request.layer + 1,
+                            destination,
+                            next_zone,
+                            next_next_zone,
+                        )?,
+                    destination,
+                ))
+            })
+            .collect::<Vec<_>>();
+        if ranked.len() > request.candidate_limit {
+            ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
+            ranked.truncate(request.candidate_limit);
+        }
+        result.extend(ranked.into_iter().map(|(_, destination)| destination));
+    }
+    Ok(result)
+}
+
 fn forward_beam(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
@@ -594,7 +747,9 @@ fn forward_beam(
                     }
                     result
                 }
-                (CandidateStrategy::FactorMap, Some(_)) if unassigned => {
+                (CandidateStrategy::FactorMap | CandidateStrategy::PartialScreen, Some(_))
+                    if unassigned =>
+                {
                     let map_started = profile.then(Instant::now);
                     let factor_suffixes = if backward.frontiers[layer + 1].is_empty() {
                         guidance_suffixes
@@ -613,20 +768,32 @@ fn forward_beam(
                         .saturating_mul(2)
                         .div_ceil(map_count);
                     let mut result = Vec::with_capacity(per_map_limit * map_count);
-                    result.extend(factor_map_candidates(
-                        inputs,
-                        FactorMapRequest {
-                            layer,
-                            previous_zone,
-                            origin: parent.zone,
-                            suffixes: &factor_suffixes[..map_count],
-                            anchor_slot: candidate_slot,
-                            anchors: &parent.anchors,
-                            candidate_limit: per_map_limit,
+                    let request = FactorMapRequest {
+                        layer,
+                        previous_zone,
+                        origin: parent.zone,
+                        suffixes: &factor_suffixes[..map_count],
+                        anchor_slot: candidate_slot,
+                        anchors: &parent.anchors,
+                        candidate_limit: per_map_limit,
+                    };
+                    result.extend(
+                        if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
+                            factor_map_candidates(
+                                inputs,
+                                request,
+                                &backward.nodes,
+                                factor_map_cache,
+                            )?
+                        } else {
+                            partial_screen_candidates(
+                                inputs,
+                                request,
+                                &backward.nodes,
+                                factor_map_cache,
+                            )?
                         },
-                        &backward.nodes,
-                        factor_map_cache,
-                    )?);
+                    );
                     if let Some(started) = map_started {
                         report.factor_map_ns += started.elapsed().as_nanos() as u64;
                     }
@@ -1099,7 +1266,10 @@ fn extend_backward_guidance(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let guidance_width = if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
+    let guidance_width = if matches!(
+        inputs.options.candidate_strategy,
+        CandidateStrategy::FactorMap | CandidateStrategy::PartialScreen
+    ) {
         inputs.options.continuation_state_limit.max(4)
     } else {
         inputs.options.continuation_state_limit
@@ -1351,6 +1521,7 @@ fn search_context(
     let use_heuristic = match options.candidate_strategy {
         CandidateStrategy::Surface => context.steps.len() > 4,
         CandidateStrategy::FactorMap => context.steps.len() > options.factor_map_max_depth,
+        CandidateStrategy::PartialScreen => context.steps.len() > options.factor_map_max_depth,
         CandidateStrategy::Heuristic => false,
     };
     let options = if use_heuristic {
