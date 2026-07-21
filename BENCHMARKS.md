@@ -6,19 +6,21 @@ kernel measurements, not end-to-end Mobility timings.
 ## Active bounded top-K
 
 Full prepared Grand Geneve workload (81,844 contexts, 328,197 steps, 1,110
-zones), eight threads; `frontier_width=32`, `proposal_limit_per_source=16`,
+zones), eight threads; `frontier_width=40`, `proposal_limit_per_source=16`,
 `factor_map_max_depth=5`, `stitch_bias=1`, `continuation_state_limit=1`,
 `continuation_proposal_limit=1`, `seam_refresh_per_prefix=1`, `top_k=10`.
 
 | Policy | Wall time | Complete | Infeasible |
 |---|---:|---:|---:|
-| Factor map, depth <=5 (default) | 22.534 s | 70,303 | 11,541 |
+| Factor map, depth <=5 (default) | 23.011 s | 70,325 | 11,519 |
 | Binned surface comparator | 8.785 s | 70,143 | 11,701 |
 | Heuristic comparator | 6.591 s | 70,351 | 11,493 |
 
-The default remains comfortably within the 30-second target and improves the
-global stratified `Mass@10` pilot to 0.794 (centred factor-map 0.767; surface
-0.735; heuristic 0.707).
+The default remains comfortably within the 30-second target. A five-per-stratum
+audit (69 oracle-proven contexts; 99.4% population coverage) estimates
+`Mass@10` at 0.784 (width 32: 0.772; surface 0.735; heuristic 0.707).
+An independent seed-43, three-per-stratum cohort estimates 0.774 over 36
+oracle-proven contexts (91.5% coverage).
 Older throughput and
 quality measurements are experiment history, not the active baseline.
 

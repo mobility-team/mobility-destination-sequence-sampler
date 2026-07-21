@@ -15,11 +15,12 @@ are cached per context.
 
 ## Evidence (Grand Geneve, 2026-07-21)
 
-- Global stratified pilot, three contexts in each of 22 strata: weighted
-  `Mass@10` 0.794, versus the centred factor-map cut 0.767, surface 0.735, and
-  heuristic 0.707. Oracle-certifiable coverage is 93.9% (44 contexts).
+- Global five-per-stratum audit: weighted `Mass@10` 0.784 at width 40,
+  versus 0.772 at width 32, centred factor-map 0.767, surface 0.735, and
+  heuristic 0.707. It has 69 proven contexts (99.4% coverage); an independent
+  seed-43 three-per-stratum cohort gives 0.774 over 36 (91.5%).
 - Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones,
-  eight threads: factor-map depth 5 22.534 s, 70,303 complete; inside 30 s.
+  eight threads: factor-map depth 5 23.011 s, 70,325 complete; inside 30 s.
 
 Rejected: one suffix collapses geographically (0.488 pilot); eight suffixes
 split the fixed candidate budget (0.745); 32 proposals per source add beam

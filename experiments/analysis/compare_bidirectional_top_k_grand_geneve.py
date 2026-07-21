@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         help="fixed exact-plan support used to normalize all requested K values",
     )
     parser.add_argument("--max-states", type=int, default=2_000_000)
-    parser.add_argument("--frontier-width", type=int, default=32)
+    parser.add_argument("--frontier-width", type=int, default=40)
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
     parser.add_argument(
         "--candidate-strategy",
@@ -76,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stitch-bias", type=int, default=1)
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
+    parser.add_argument("--seam-refresh-per-prefix", type=int, default=1)
     parser.add_argument("--archetype-strata-limit", type=int, default=12)
     parser.add_argument(
         "--trace-context",
@@ -736,6 +737,7 @@ def compare_seed(
                     stitch_bias=args.stitch_bias,
                     continuation_state_limit=args.continuation_state_limit,
                     continuation_proposal_limit=args.continuation_proposal_limit,
+                    seam_refresh_per_prefix=args.seam_refresh_per_prefix,
                     top_k=top_k,
                     n_threads=1,
                     skip_infeasible=False,
