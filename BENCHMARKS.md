@@ -12,7 +12,7 @@ zones), eight threads; `frontier_width=40`, `proposal_limit_per_source=16`,
 
 | Policy | Wall time | Complete | Infeasible |
 |---|---:|---:|---:|
-| Factor map, depth <=5 (default) | 15.5 s | 70,320 | 11,524 |
+| Factor map, depth <=5 (default) | 14.56 s | 70,320 | 11,524 |
 | Binned surface comparator | 8.785 s | 70,143 | 11,701 |
 | Heuristic comparator | 6.591 s | 70,351 | 11,493 |
 

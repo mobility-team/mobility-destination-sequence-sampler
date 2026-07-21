@@ -20,7 +20,7 @@ fixed neighbours are cached per context.
   heuristic 0.707. It has 69 proven contexts (99.4% coverage); an independent
   seed-43 three-per-stratum cohort gives 0.774 over 36 (91.5%).
 - Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones,
-  eight threads: factor-map depth 5 15.5 s, 70,320 complete; inside 30 s.
+  eight threads: factor-map depth 5 14.56 s, 70,320 complete; inside 30 s.
 
 Rejected: one suffix collapses geographically (0.488 pilot); eight suffixes
 split the fixed candidate budget (0.745); 32 proposals per source add beam

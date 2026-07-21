@@ -195,31 +195,6 @@ pub(crate) fn score_local_weight_edges(
     ))
 }
 
-/// The destination-dependent part available when only the incoming leg is
-/// known.  It deliberately omits duration utility: that term couples this
-/// edge to the unknown outgoing leg and must remain in [`score_local_weight`].
-pub(crate) fn score_inbound_partial(
-    inputs: ScoringInputs<'_>,
-    layer: usize,
-    origin: usize,
-    destination: usize,
-) -> Option<f64> {
-    let step = inputs.context.steps[layer];
-    let edge = inputs.graph.edge_to(origin, destination)?;
-    adjusted_times(step, edge)?;
-    let destination_value =
-        fixed_destination_value(inputs.destinations.activity(step.activity_id), destination);
-    let attraction =
-        if step.fixed_destination.is_some() || !inputs.problem.first_choice_by_layer[layer] {
-            0.0
-        } else if destination_value.log_opportunity_capacity.is_finite() {
-            destination_value.log_opportunity_capacity
-        } else {
-            return None;
-        };
-    Some(attraction - inputs.parameters.logit_scale * edge.cost)
-}
-
 pub(crate) fn score_zones(inputs: ScoringInputs<'_>, zones: &[usize]) -> Option<(f64, Vec<f64>)> {
     let initial_zone = *inputs.graph.zone_index.get(&inputs.context.initial_zone)?;
     let mut local_weights = Vec::with_capacity(zones.len());
