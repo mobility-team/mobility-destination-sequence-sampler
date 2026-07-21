@@ -136,6 +136,28 @@ pub(crate) fn score_local_weight(
 ) -> Option<f64> {
     let step = inputs.context.steps[layer];
     let edge = inputs.graph.edge_to(origin, destination)?;
+    let terminal_fixed_destination =
+        layer + 1 == inputs.context.steps.len() && step.fixed_destination.is_some();
+    let next_edge = if terminal_fixed_destination {
+        None
+    } else {
+        Some(inputs.graph.edge_to(destination, next_destination?)?)
+    };
+    score_local_weight_edges(inputs, layer, destination, edge, next_edge)
+}
+
+/// Exact local scoring with already-resolved inbound and outgoing OD edges.
+/// Map builders use this to reuse fixed legs without changing the factor
+/// formula or its rigidity feasibility checks.
+#[inline]
+pub(crate) fn score_local_weight_edges(
+    inputs: ScoringInputs<'_>,
+    layer: usize,
+    destination: usize,
+    edge: Edge,
+    next_edge: Option<Edge>,
+) -> Option<f64> {
+    let step = inputs.context.steps[layer];
     let (_, arrival) = adjusted_times(step, edge)?;
     let terminal_fixed_destination =
         layer + 1 == inputs.context.steps.len() && step.fixed_destination.is_some();
@@ -143,7 +165,7 @@ pub(crate) fn score_local_weight(
         MIN_ACTIVITY_DURATION_HOURS
     } else if inputs.parameters.update_plan_timings {
         let next_step = inputs.context.steps.get(layer + 1)?;
-        let next_edge = inputs.graph.edge_to(destination, next_destination?)?;
+        let next_edge = next_edge?;
         let (next_departure, _) = adjusted_times(*next_step, next_edge)?;
         let duration = next_departure - arrival;
         if duration <= 0.0 {

@@ -17,7 +17,7 @@ use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
 use crate::scoring::{
     build_scoring_problem, fixed_destination_value, score_inbound_partial, score_local_weight,
-    score_zones, Parameters, ScoringInputs, ScoringProblem,
+    score_local_weight_edges, score_zones, Parameters, ScoringInputs, ScoringProblem,
 };
 
 mod candidates;
@@ -421,18 +421,26 @@ fn factor_map_candidates(
     let zone_count = inputs.graph.zone_ids.len();
     let initial_previous_map;
     let previous_map = if let Some(previous_zone) = request.previous_zone {
+        let inbound = inputs.graph.edge_to(previous_zone, request.origin);
         maps.previous
             .entry((request.layer - 1, previous_zone, request.origin))
             .or_insert_with(|| {
                 let mut map = vec![None; zone_count];
                 for &destination in domain {
-                    map[destination] = score_local_weight(
-                        inputs.scoring(),
-                        request.layer - 1,
-                        previous_zone,
-                        request.origin,
-                        Some(destination),
-                    );
+                    map[destination] = inbound.and_then(|inbound| {
+                        inputs
+                            .graph
+                            .edge_to(request.origin, destination)
+                            .and_then(|outbound| {
+                                score_local_weight_edges(
+                                    inputs.scoring(),
+                                    request.layer - 1,
+                                    request.origin,
+                                    inbound,
+                                    Some(outbound),
+                                )
+                            })
+                    });
                 }
                 map
             })
@@ -464,35 +472,52 @@ fn factor_map_candidates(
         let suffix = &suffix_nodes[suffix_index];
         let next_zone = suffix.zone;
         let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
-        let current_map = maps
-            .current
-            .entry((request.layer, request.origin, next_zone))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] = score_local_weight(
-                        inputs.scoring(),
-                        request.layer,
-                        request.origin,
-                        destination,
-                        Some(next_zone),
-                    );
-                }
-                map
-            });
+        let current_map =
+            maps.current
+                .entry((request.layer, request.origin, next_zone))
+                .or_insert_with(|| {
+                    let mut map = vec![None; zone_count];
+                    for &destination in domain {
+                        map[destination] = inputs
+                            .graph
+                            .edge_to(request.origin, destination)
+                            .and_then(|inbound| {
+                                inputs
+                                    .graph
+                                    .edge_to(destination, next_zone)
+                                    .and_then(|outbound| {
+                                        score_local_weight_edges(
+                                            inputs.scoring(),
+                                            request.layer,
+                                            destination,
+                                            inbound,
+                                            Some(outbound),
+                                        )
+                                    })
+                            });
+                    }
+                    map
+                });
+        let next_outbound = next_next_zone.and_then(|zone| inputs.graph.edge_to(next_zone, zone));
         let next_map = maps
             .next
             .entry((request.layer + 1, next_zone, next_next_zone))
             .or_insert_with(|| {
                 let mut map = vec![None; zone_count];
                 for &destination in domain {
-                    map[destination] = score_local_weight(
-                        inputs.scoring(),
-                        request.layer + 1,
-                        destination,
-                        next_zone,
-                        next_next_zone,
-                    );
+                    map[destination] =
+                        inputs
+                            .graph
+                            .edge_to(destination, next_zone)
+                            .and_then(|inbound| {
+                                score_local_weight_edges(
+                                    inputs.scoring(),
+                                    request.layer + 1,
+                                    next_zone,
+                                    inbound,
+                                    next_outbound,
+                                )
+                            });
                 }
                 map
             });
