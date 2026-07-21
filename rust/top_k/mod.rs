@@ -74,6 +74,9 @@ struct BackwardMessages {
     /// through the prefix layers. It guides proposal/ranking but never limits
     /// the wider frontier used for the exact final stitch.
     guidance_frontiers: Vec<Vec<usize>>,
+    /// Independently propagated wider channel used only to add factor-map
+    /// proposals. It never changes the primary continuation ranking states.
+    map_guidance_frontiers: Vec<Vec<usize>>,
 }
 
 #[derive(Default)]
@@ -178,6 +181,9 @@ pub struct TopKOptions {
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
     pub continuation_proposal_limit: usize,
+    /// Optional wider reverse reservoir used only for factor-map proposals.
+    /// The ordinary continuation channel still owns forward beam ranking.
+    pub map_guidance_state_limit: usize,
     pub seam_refresh_per_prefix: usize,
     pub profile: bool,
 }
@@ -207,6 +213,23 @@ impl SearchInputs<'_> {
             problem: &self.problem,
             parameters: self.parameters,
         }
+    }
+
+    fn primary_guidance_state_limit(&self) -> usize {
+        if matches!(
+            self.options.candidate_strategy,
+            CandidateStrategy::FactorMap | CandidateStrategy::PartialScreen
+        ) {
+            self.options.continuation_state_limit.max(4)
+        } else {
+            self.options.continuation_state_limit
+        }
+    }
+
+    fn map_guidance_state_limit(&self) -> usize {
+        self.options
+            .map_guidance_state_limit
+            .max(self.primary_guidance_state_limit())
     }
 }
 
@@ -382,6 +405,7 @@ fn best_continuation_score(
     best.is_finite().then_some(best)
 }
 
+#[derive(Clone, Copy)]
 struct FactorMapRequest<'a> {
     layer: usize,
     previous_zone: Option<usize>,
@@ -677,7 +701,7 @@ fn forward_beam(
     let anchor_slots = &inputs.anchor_slots;
     let continuation_state_limit = inputs.options.continuation_state_limit;
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
-    let factor_map_guidance_limit = continuation_state_limit.max(4);
+    let factor_map_guidance_limit = inputs.map_guidance_state_limit();
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let factor_map_cache = &mut scratch.factor_map_cache;
@@ -755,31 +779,60 @@ fn forward_beam(
                     if unassigned =>
                 {
                     let map_started = profile.then(Instant::now);
-                    let factor_suffixes = if backward.frontiers[layer + 1].is_empty() {
+                    let use_guidance = backward.frontiers[layer + 1].is_empty();
+                    let primary_suffixes = if use_guidance {
                         guidance_suffixes
                     } else {
                         &backward.frontiers[layer + 1]
                     };
-                    let map_count = factor_suffixes.len().min(factor_map_guidance_limit);
+                    let primary_count = primary_suffixes.len().min(continuation_state_limit.max(4));
+                    let mut reserve_suffixes = Vec::new();
+                    if use_guidance
+                        && inputs.options.candidate_strategy == CandidateStrategy::FactorMap
+                    {
+                        let primary_keys = primary_suffixes[..primary_count]
+                            .iter()
+                            .map(|&index| {
+                                let node = &backward.nodes[index];
+                                (node.zone, node.next.map(|next| backward.nodes[next].zone))
+                            })
+                            .collect::<BTreeSet<_>>();
+                        reserve_suffixes.extend(
+                            backward.map_guidance_frontiers[layer + 1]
+                                .iter()
+                                .copied()
+                                .filter(|&index| {
+                                    let node = &backward.nodes[index];
+                                    !primary_keys.contains(&(
+                                        node.zone,
+                                        node.next.map(|next| backward.nodes[next].zone),
+                                    ))
+                                })
+                                .take(factor_map_guidance_limit.saturating_sub(primary_count)),
+                        );
+                    }
+                    let map_count = primary_count + reserve_suffixes.len();
                     if context.steps[layer].fixed_destination.is_none() {
                         report.factor_map_destination_evaluations += destinations
                             .domain(context.steps[layer].activity_id)
                             .map_or(0, |domain| domain.len() as u64 * map_count as u64);
                     }
-                    let per_map_limit = inputs
+                    let per_primary_limit = inputs
                         .options
                         .proposal_limit_per_source
                         .saturating_mul(2)
-                        .div_ceil(map_count);
-                    let mut result = Vec::with_capacity(per_map_limit * map_count);
+                        .div_ceil(primary_count);
+                    let mut result = Vec::with_capacity(
+                        per_primary_limit * primary_count + map_count.saturating_sub(primary_count),
+                    );
                     let request = FactorMapRequest {
                         layer,
                         previous_zone,
                         origin: parent.zone,
-                        suffixes: &factor_suffixes[..map_count],
+                        suffixes: &primary_suffixes[..primary_count],
                         anchor_slot: candidate_slot,
                         anchors: &parent.anchors,
-                        candidate_limit: per_map_limit,
+                        candidate_limit: per_primary_limit,
                     };
                     result.extend(
                         if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
@@ -799,6 +852,23 @@ fn forward_beam(
                             )?
                         },
                     );
+                    // Keep the validated primary message support intact. A
+                    // wider guidance reservoir may add one exact-map winner
+                    // per extra suffix, but never takes candidates away from
+                    // the primary four-message allocation.
+                    if !reserve_suffixes.is_empty() {
+                        result.extend(factor_map_candidates(
+                            inputs,
+                            FactorMapRequest {
+                                suffixes: &reserve_suffixes,
+                                candidate_limit: 1,
+                                ..request
+                            },
+                            &backward.nodes,
+                            factor_map_cache,
+                            factor_map_ranked,
+                        )?);
+                    }
                     if let Some(started) = map_started {
                         report.factor_map_ns += started.elapsed().as_nanos() as u64;
                     }
@@ -1259,26 +1329,20 @@ fn backward_beam(
         nodes,
         frontiers,
         guidance_frontiers: vec![Vec::new(); context.steps.len()],
+        map_guidance_frontiers: vec![Vec::new(); context.steps.len()],
     })
 }
 
-fn extend_backward_guidance(
+fn build_backward_guidance(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
     stitch_layer: usize,
     messages: &mut BackwardMessages,
-) -> Result<(), SamplerError> {
+    guidance_width: usize,
+) -> Result<Vec<Vec<usize>>, SamplerError> {
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let guidance_width = if matches!(
-        inputs.options.candidate_strategy,
-        CandidateStrategy::FactorMap | CandidateStrategy::PartialScreen
-    ) {
-        inputs.options.continuation_state_limit.max(4)
-    } else {
-        inputs.options.continuation_state_limit
-    };
     let candidate_count = inputs.options.proposal_limit_per_source;
     let anchor_slots = &inputs.anchor_slots;
     let profile = inputs.options.profile;
@@ -1300,7 +1364,8 @@ fn extend_backward_guidance(
         .copied()
         .take(guidance_width)
         .collect::<Vec<_>>();
-    messages.guidance_frontiers[stitch_layer + 1] = frontier.clone();
+    let mut guidance_frontiers = vec![Vec::new(); context.steps.len()];
+    guidance_frontiers[stitch_layer + 1] = frontier.clone();
     for layer in (0..=stitch_layer).rev() {
         let mut children = Vec::new();
         let mut scores = Vec::new();
@@ -1371,12 +1436,12 @@ fn extend_backward_guidance(
                 node_index
             })
             .collect();
-        messages.guidance_frontiers[layer] = frontier.clone();
+        guidance_frontiers[layer] = frontier.clone();
     }
     if let Some(started) = started {
         report.backward_guidance_ns += started.elapsed().as_nanos() as u64;
     }
-    Ok(())
+    Ok(guidance_frontiers)
 }
 
 fn prefix_zones(nodes: &[PrefixNode], mut index: usize) -> Vec<usize> {
@@ -1562,7 +1627,26 @@ fn search_context(
         .clamp(0, inputs.context.steps.len() as i32 - 2) as usize;
     let backward = backward_beam(&inputs, &mut scratch, stitch_layer + 1)?;
     let mut backward = backward;
-    extend_backward_guidance(&inputs, &mut scratch, stitch_layer, &mut backward)?;
+    let primary_guidance_width = inputs.primary_guidance_state_limit();
+    backward.guidance_frontiers = build_backward_guidance(
+        &inputs,
+        &mut scratch,
+        stitch_layer,
+        &mut backward,
+        primary_guidance_width,
+    )?;
+    let map_guidance_width = inputs.map_guidance_state_limit();
+    backward.map_guidance_frontiers = if map_guidance_width > primary_guidance_width {
+        build_backward_guidance(
+            &inputs,
+            &mut scratch,
+            stitch_layer,
+            &mut backward,
+            map_guidance_width,
+        )?
+    } else {
+        backward.guidance_frontiers.clone()
+    };
     let (prefix_nodes, forward) = forward_beam(&inputs, &mut scratch, stitch_layer, &backward)?;
     refresh_stitch_frontier(
         &inputs,
