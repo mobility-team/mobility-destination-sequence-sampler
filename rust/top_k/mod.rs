@@ -214,6 +214,7 @@ impl SearchInputs<'_> {
 struct SearchScratch {
     candidate_cache: CandidateCache,
     factor_map_cache: FactorMapCache,
+    factor_map_ranked: Vec<(f64, usize)>,
     local_scores: LocalScoreCache,
     report: TopKReport,
 }
@@ -223,6 +224,7 @@ impl SearchScratch {
         Self {
             candidate_cache: CandidateCache::default(),
             factor_map_cache: FactorMapCache::default(),
+            factor_map_ranked: Vec::new(),
             local_scores: LocalScoreCache::default(),
             report: TopKReport {
                 contexts: 1,
@@ -399,6 +401,7 @@ fn factor_map_candidates(
     request: FactorMapRequest<'_>,
     suffix_nodes: &[SuffixNode],
     maps: &mut FactorMapCache,
+    ranked: &mut Vec<(f64, usize)>,
 ) -> Result<Vec<usize>, SamplerError> {
     if let Some(zone) = request.anchor_slot.and_then(|slot| request.anchors[slot]) {
         return Ok(vec![zone]);
@@ -493,21 +496,21 @@ fn factor_map_candidates(
                 }
                 map
             });
-        let mut ranked = domain
-            .iter()
-            .filter_map(|&destination| {
-                Some((
-                    previous_map[destination]? + current_map[destination]? + next_map[destination]?,
-                    destination,
-                ))
-            })
-            .collect::<Vec<_>>();
+        ranked.clear();
+        ranked.extend(domain.iter().filter_map(|&destination| {
+            Some((
+                previous_map[destination]? + current_map[destination]? + next_map[destination]?,
+                destination,
+            ))
+        }));
         if ranked.len() > request.candidate_limit {
             ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
             ranked.truncate(request.candidate_limit);
         }
-        result.extend(ranked.into_iter().map(|(_, destination)| destination));
+        result.extend(ranked.iter().map(|&(_, destination)| destination));
     }
+    result.sort_unstable();
+    result.dedup();
     Ok(result)
 }
 
@@ -678,6 +681,7 @@ fn forward_beam(
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let factor_map_cache = &mut scratch.factor_map_cache;
+    let factor_map_ranked = &mut scratch.factor_map_ranked;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
     let candidate_inputs = CandidateInputs {
@@ -784,6 +788,7 @@ fn forward_beam(
                                 request,
                                 &backward.nodes,
                                 factor_map_cache,
+                                factor_map_ranked,
                             )?
                         } else {
                             partial_screen_candidates(
