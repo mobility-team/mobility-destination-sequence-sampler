@@ -32,15 +32,20 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_GROUP_DAY_TRIPS_FOLDER,
     )
     parser.add_argument("--contexts", type=int, default=1_000)
+    parser.add_argument(
+        "--all-supported",
+        action="store_true",
+        help="time every prepared depth>=2 context, including variable anchors",
+    )
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--frontier-width", type=int, default=32)
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
     parser.add_argument(
         "--candidate-strategy",
-        choices=("heuristic", "exact_local", "exact_local_fallback", "exact_local_depth3", "forward_local_depth3", "hybrid_local", "mixed_local", "projected_local"),
-        default="heuristic",
+        choices=("surface", "heuristic"),
+        default="surface",
     )
-    parser.add_argument("--local-projection-limit", type=int, default=256)
+    parser.add_argument("--surface-bins", type=int, choices=(2, 4), default=2)
     parser.add_argument("--stitch-bias", type=int, default=0)
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
@@ -55,11 +60,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def eligible_contexts(steps: pl.DataFrame, count: int, seed: int) -> pl.DataFrame:
+def eligible_contexts(
+    steps: pl.DataFrame, count: int, seed: int, all_supported: bool
+) -> pl.DataFrame:
     """Choose short final-home contexts for the bounded stitch-layer search."""
     if count <= 0:
         raise ValueError("--contexts must be positive")
-    eligible = (
+    profiles = (
         steps.group_by("context_id")
         .agg(
             layers=pl.len(),
@@ -68,9 +75,11 @@ def eligible_contexts(steps: pl.DataFrame, count: int, seed: int) -> pl.DataFram
                 & pl.col("anchor_id").is_not_null()
             ).sum(),
         )
-        .filter(
-            (pl.col("layers") >= 3) & (pl.col("variable_anchors") == 0)
-        )
+    )
+    if all_supported:
+        return profiles.filter(pl.col("layers") >= 2).select("context_id")
+    eligible = (
+        profiles.filter((pl.col("layers") >= 3) & (pl.col("variable_anchors") == 0))
         .with_columns(sample_order=pl.col("context_id").hash(seed=seed))
         .sort("sample_order")
         .head(count)
@@ -97,7 +106,9 @@ def main() -> None:
         demand_groups_path=files["demand_groups"],
         activity_dur_path=files["activity_dur"],
     )
-    selected = eligible_contexts(steps, args.contexts, args.exploration_seed)
+    selected = eligible_contexts(
+        steps, args.contexts, args.exploration_seed, args.all_supported
+    )
     steps = steps.join(selected, on="context_id", how="semi")
     initial_locations = initial_locations.join(selected, on="context_id", how="semi")
     search = DestinationPlanSearch(
@@ -115,7 +126,7 @@ def main() -> None:
         frontier_width=args.frontier_width,
         proposal_limit_per_source=args.proposal_limit_per_source,
         candidate_strategy=args.candidate_strategy,
-        local_projection_limit=args.local_projection_limit,
+        surface_bins=args.surface_bins,
         stitch_bias=args.stitch_bias,
         continuation_state_limit=args.continuation_state_limit,
         continuation_proposal_limit=args.continuation_proposal_limit,
@@ -136,7 +147,7 @@ def main() -> None:
         f"stitch-bias={args.stitch_bias} "
         f"proposal-limit={args.proposal_limit_per_source} "
         f"candidate-strategy={args.candidate_strategy} "
-        f"local-projection={args.local_projection_limit} "
+        f"surface-bins={args.surface_bins} "
         f"continuation={args.continuation_state_limit}x{args.continuation_proposal_limit} "
         f"seam-refresh={args.seam_refresh_per_prefix} "
         f"threads={args.threads}"
@@ -151,7 +162,6 @@ def main() -> None:
         f"refresh-states={bidirectional_report['seam_refresh_states']} "
         f"stitch-pairs={bidirectional_report['stitch_pairs']} "
         f"infeasible={bidirectional_report['infeasible_contexts']}"
-        f" fallback={bidirectional_report['heuristic_fallback_contexts']}"
     )
     if args.profile:
         total_ns = bidirectional_report["total_search_ns"]
@@ -169,8 +179,8 @@ def main() -> None:
                 ),
                 ("continuation_guidance", continuation_guidance_ns),
                 (
-                    "exact_local_proposals",
-                    bidirectional_report["exact_local_proposal_ns"],
+                    "surface_proposals",
+                    bidirectional_report["surface_proposal_ns"],
                 ),
                 ("seam_refresh", bidirectional_report["seam_refresh_ns"]),
                 ("stitch", bidirectional_report["stitch_ns"]),

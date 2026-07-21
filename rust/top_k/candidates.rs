@@ -9,7 +9,7 @@ use crate::scoring::{score_local_weight, ScoringInputs};
 
 #[derive(Default)]
 pub(super) struct CandidateCache {
-    base: HashMap<(usize, usize, bool, usize), Vec<usize>>,
+    base: HashMap<(usize, usize, bool), Vec<usize>>,
     reverse_projection: HashMap<(usize, usize), Vec<usize>>,
 }
 
@@ -20,6 +20,7 @@ pub(super) struct CandidateInputs<'a> {
     pub context: &'a Context,
     pub scoring: ScoringInputs<'a>,
     pub candidate_count: usize,
+    pub surface_bins: usize,
     pub exploration_seed: u64,
 }
 
@@ -115,12 +116,7 @@ pub(super) fn candidates(
     if let Some(zone) = query.anchor_slot.and_then(|slot| query.anchors[slot]) {
         return Ok(vec![zone]);
     }
-    let key = (
-        query.layer,
-        query.reference_zone,
-        query.reverse,
-        inputs.candidate_count,
-    );
+    let key = (query.layer, query.reference_zone, query.reverse);
     let base = if let Some(base) = cache.base.get(&key) {
         base
     } else {
@@ -163,99 +159,17 @@ pub(super) fn candidates(
     Ok(result)
 }
 
-/// Return the highest exact local-utility destinations for a known successor.
+/// Diverse candidates from a precomputed utility surface.
 ///
-/// This deliberately scans the activity domain. It is the quality reference
-/// for a future indexed utility surface: routing features are already compact
-/// in `OdGraph`, while scoring remains owned by the shared scorer.
-fn select_exact_local_candidates(
+/// The surface dimensions are attraction rank, inbound cost rank, and the
+/// worse of inbound/outbound time-pressure ranks.  Keeping several winners
+/// per cell prevents one speculative backward successor from collapsing the
+/// forward beam into a single geographic region. The active resolution is
+/// 2x2x2; the raw indexes also support experimental 4x4x4 maps.
+pub(super) fn surface_candidates(
     inputs: CandidateInputs<'_>,
     query: CandidateQuery<'_>,
     next_zone: usize,
-    candidate_zones: impl IntoIterator<Item = usize>,
-) -> Result<Vec<usize>, SamplerError> {
-    if let Some(zone) = query.anchor_slot.and_then(|slot| query.anchors[slot]) {
-        return Ok(vec![zone]);
-    }
-    let step = inputs.context.steps[query.layer];
-    if let Some(fixed) = step.fixed_destination {
-        return Ok(vec![inputs.graph.zone_index[&fixed]]);
-    }
-    // Match the current 16 attractive + 16 travel-cost + 2 exploration
-    // budget, so the first comparison changes ranking quality rather than the
-    // candidate-pool width.
-    let limit = inputs
-        .candidate_count
-        .saturating_mul(2)
-        .saturating_add(2)
-        .min(
-            inputs
-                .destinations
-                .domain(step.activity_id)
-                .map_or(0, <[usize]>::len),
-        );
-    let mut scored = candidate_zones
-        .into_iter()
-        .filter_map(|destination| {
-            score_local_weight(
-                inputs.scoring,
-                query.layer,
-                query.reference_zone,
-                destination,
-                Some(next_zone),
-            )
-            .map(|score| (score, destination))
-        })
-        .collect::<Vec<_>>();
-    let compare = |left: &(f64, usize), right: &(f64, usize)| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-    };
-    if scored.len() > limit {
-        scored.select_nth_unstable_by(limit - 1, compare);
-        scored.truncate(limit);
-    }
-    scored.sort_unstable_by(compare);
-    Ok(scored
-        .into_iter()
-        .map(|(_, destination)| destination)
-        .collect())
-}
-
-pub(super) fn exact_local_candidates(
-    inputs: CandidateInputs<'_>,
-    query: CandidateQuery<'_>,
-    next_zone: usize,
-) -> Result<Vec<usize>, SamplerError> {
-    let domain = inputs
-        .destinations
-        .domain(inputs.context.steps[query.layer].activity_id)
-        .ok_or(SamplerError::NoFeasibleSequence {
-            context_id: inputs.context.context_id,
-            origin: inputs.context.initial_zone,
-        })?;
-    select_exact_local_candidates(inputs, query, next_zone, domain.iter().copied())
-}
-
-pub(super) fn exact_local_candidates_from(
-    inputs: CandidateInputs<'_>,
-    query: CandidateQuery<'_>,
-    next_zone: usize,
-    candidate_zones: &[usize],
-) -> Result<Vec<usize>, SamplerError> {
-    select_exact_local_candidates(inputs, query, next_zone, candidate_zones.iter().copied())
-}
-
-/// Reverse counterpart of [`exact_local_candidates`].  The predecessor is
-/// unknown on this front, but a candidate is the incoming origin of the known
-/// next activity, so score that activity exactly instead.
-pub(super) fn exact_reverse_local_candidates(
-    inputs: CandidateInputs<'_>,
-    query: CandidateQuery<'_>,
-    next_zone: usize,
-    next_next_zone: Option<usize>,
 ) -> Result<Vec<usize>, SamplerError> {
     if let Some(zone) = query.anchor_slot.and_then(|slot| query.anchors[slot]) {
         return Ok(vec![zone]);
@@ -272,36 +186,63 @@ pub(super) fn exact_reverse_local_candidates(
                 context_id: inputs.context.context_id,
                 origin: inputs.context.initial_zone,
             })?;
-    let limit = inputs
-        .candidate_count
-        .saturating_mul(2)
-        .saturating_add(2)
-        .min(domain.len());
-    let mut scored = domain
-        .iter()
-        .filter_map(|&candidate| {
-            score_local_weight(
-                inputs.scoring,
-                query.layer + 1,
-                candidate,
-                next_zone,
-                next_next_zone,
-            )
-            .map(|score| (score, candidate))
-        })
-        .collect::<Vec<_>>();
     let compare = |left: &(f64, usize), right: &(f64, usize)| {
         right
             .0
             .total_cmp(&left.0)
             .then_with(|| left.1.cmp(&right.1))
     };
-    if scored.len() > limit {
-        scored.select_nth_unstable_by(limit - 1, compare);
-        scored.truncate(limit);
+    let cell_count = inputs.surface_bins.pow(3);
+    let per_cell = (inputs.candidate_count.saturating_mul(2))
+        .div_ceil(cell_count)
+        .max(1);
+    let mut cells = vec![Vec::new(); cell_count];
+    for &destination in domain {
+        let Some(score) = score_local_weight(
+            inputs.scoring,
+            query.layer,
+            query.reference_zone,
+            destination,
+            Some(next_zone),
+        ) else {
+            continue;
+        };
+        let Some(attraction_band) = inputs
+            .destinations
+            .attraction_band(step.activity_id, destination)
+        else {
+            continue;
+        };
+        let Some((cost_band, time_band)) =
+            inputs
+                .graph
+                .surface_bands(query.reference_zone, destination, next_zone)
+        else {
+            continue;
+        };
+        let attraction_band = attraction_band as usize * inputs.surface_bins / 4;
+        let cost_band = cost_band as usize * inputs.surface_bins / 4;
+        let time_band = time_band as usize * inputs.surface_bins / 4;
+        let cell =
+            (attraction_band * inputs.surface_bins + cost_band) * inputs.surface_bins + time_band;
+        let cell = &mut cells[cell];
+        let rank =
+            cell.partition_point(|existing| compare(existing, &(score, destination)).is_lt());
+        if rank < per_cell {
+            cell.insert(rank, (score, destination));
+            cell.truncate(per_cell);
+        }
     }
-    scored.sort_unstable_by(compare);
-    Ok(scored.into_iter().map(|(_, candidate)| candidate).collect())
+    let mut result = Vec::with_capacity(per_cell * cells.len());
+    for cell in &cells {
+        result.extend(cell.iter().copied());
+    }
+    result.sort_unstable_by(compare);
+    result.truncate(inputs.candidate_count.saturating_mul(2));
+    Ok(result
+        .into_iter()
+        .map(|(_, destination)| destination)
+        .collect())
 }
 
 pub(super) fn reverse_projection_candidates(

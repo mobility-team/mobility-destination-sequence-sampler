@@ -310,7 +310,7 @@ def test_bidirectional_top_k_matches_exact_when_the_beam_covers_the_toy_domain()
         exploration_seed=13,
         frontier_width=8,
         proposal_limit_per_source=2,
-        candidate_strategy="exact_local",
+        candidate_strategy="surface",
         seam_refresh_per_prefix=0,
     )
     exact, _ = search.exact_top_k(**common, max_states=100)

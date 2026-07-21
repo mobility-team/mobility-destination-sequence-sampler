@@ -5,6 +5,22 @@ kernel measurements, not end-to-end Mobility timings.
 
 ## Active bounded top-K
 
+Full prepared Grand Geneve workload (81,844 contexts, 328,197 steps, 1,110
+zones), eight threads; `frontier_width=32`, `proposal_limit_per_source=16`,
+`surface_bins=2`, `continuation_state_limit=1`,
+`continuation_proposal_limit=1`, `seam_refresh_per_prefix=1`, `top_k=10`.
+
+| Policy | Wall time | Complete | Infeasible |
+|---|---:|---:|---:|
+| Surface (default) | 8.785 s | 70,143 | 11,701 |
+| Heuristic comparator | 6.591 s | 70,351 | 11,493 |
+
+The default remains comfortably within the 30-second target and improves the
+global stratified `Mass@10` pilot from 0.707 to 0.735. Older throughput and
+quality measurements are experiment history, not the active baseline.
+
+## Earlier bounded top-K reference
+
 1,000 final-home contexts (4,767 steps, 1,110 zones), eight threads:
 `frontier_width=32`, `proposal_limit_per_source=16`,
 `continuation_state_limit=1`, `continuation_proposal_limit=1`,
@@ -14,9 +30,8 @@ kernel measurements, not end-to-end Mobility timings.
 |---:|---:|---:|
 | 0.135 s | 787 | 213 |
 
-The refresh evaluated 357,150 proposals, added 494 boundary states, and used
-19% of aggregate Rust search time. Seam lookahead gave no quality gain and was
-removed (0.258 s versus 0.135 s).
+This is retained only to compare historic experiments. Seam lookahead gave no
+quality gain and was removed.
 
 ## Exact-oracle K sweep
 

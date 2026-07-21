@@ -1,40 +1,28 @@
-# Active direction: bounded bidirectional top-K
+# Active: binned-surface top-K
 
-`DestinationPlanSearch.top_k()` grows bounded forward and backward frontiers,
-then exact-score stitches their plans. Proposals combine attractive, OD-near,
-and deterministic exploration zones; repeated anchors and rigidity-aware
-ternary factors are preserved.
+`top_k()` defaults to `candidate_strategy="surface"`. It grows bounded
+bidirectional frontiers, uses exact scoring for retained plans, and stitches
+the two fronts exactly. Depth 2 is direct exact scan; depths 3--4 use the
+surface on the forward front; longer plans retain the cheap heuristic.
 
-Defaults: `frontier_width=32`, `proposal_limit_per_source=16`,
-`continuation_state_limit=1`, `continuation_proposal_limit=1`,
-`seam_refresh_per_prefix=1`, `top_k=10`.
+The surface scores the full activity domain against the leading backward
+successor, keeps winners from cells of three precomputed rank features:
+activity attraction, inbound cost, and max inbound/outbound time pressure.
+The active 2x2x2 surface retains up to 32 diverse candidates (two 16-wide
+sources). It changes proposal support only; scoring-factor ownership is
+unchanged.
 
-The forward-to-backward refresh adds activity-correct forward proposals to the
-reverse frontier without evicting home-oriented states. It is the current
-quality improvement. The exact oracle measures retained conditional exact
-top-K mass and separates missing proposal support from beam loss.
+## Evidence (Grand Geneve, 2026-07-21)
 
-## Candidate experiments (2026-07-21)
+- Global stratified pilot, three contexts in each of 22 strata: weighted
+  `Mass@10` 0.735 vs heuristic 0.707; oracle-support mass 0.296 vs 0.291;
+  both certify 93.9% of sampled population (44 exact-proven contexts).
+- Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones,
+  eight threads: surface 8.785 s, 70,143 complete; heuristic 6.591 s,
+  70,351 complete. Both are inside the 30 s target.
+- A 4x4x4 surface sharply degraded the short-cohort mass (0.315); keep the
+  exposed resolution for experiments, but use `surface_bins=2`.
 
-`candidate_strategy="exact_local"` scans an activity domain against a known
-backward successor and retains the best 34 exact local scores. On a two-per-
-stratum Grand Geneve oracle audit it raised conditional `Mass@10` from 0.700
-to 0.795, but made 1,000-context throughput 0.262 s versus 0.160 s and added
-a bounded failure. It is the quality reference, not an active policy.
-
-`projected_local` re-ranked the heuristic pool plus 256 cheap predecessor
-zones of that successor. It failed the known five-step context 43094 and
-reduced the short-cohort `Mass@10` to 0.550; rejected.
-
-`hybrid_local`, `mixed_local`, and `exact_local_fallback` were also rejected:
-they either collapsed bounded feasibility by widening/rebalancing a frontier,
-or erased the quality gain through frequent fallback. A depth-3-only
-exact-local gate gave the best current global pilot (`Mass@10` 0.741 versus
-0.727 heuristic; 93.7% oracle-certifiable population), but reduced throughput
-cohort completion (746 versus 787 / 1,000). It is not the default.
-
-Next: a configurable binned surface. Precompute compact memberships for
-activity potential, inbound cost/time pressure, and outbound time pressure;
-rank bin upper bounds per rigidity query, expand several high-bound regions,
-then exact-score their zones. Preserve region diversity and fall back to more
-regions before widening a beam.
+Rejected local-ranking, projection, widening, fallback, and seam-lookahead
+variants are recorded in `historical.md` and Git history. Next work should
+focus on a clearly measurable proposal-support improvement, not wider beams.

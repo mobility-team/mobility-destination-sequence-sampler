@@ -23,39 +23,23 @@ use crate::scoring::{
 mod candidates;
 
 use candidates::{
-    candidates, exact_local_candidates, exact_local_candidates_from,
-    exact_reverse_local_candidates, reverse_projection_candidates, CandidateCache, CandidateInputs,
+    candidates, reverse_projection_candidates, surface_candidates, CandidateCache, CandidateInputs,
     CandidateQuery,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandidateStrategy {
     Heuristic,
-    ExactLocal,
-    ExactLocalFallback,
-    ExactLocalDepth3,
-    ForwardLocalDepth3,
-    HybridLocal,
-    MixedLocal,
-    ProjectedLocal,
+    Surface,
 }
 
 impl CandidateStrategy {
     pub(crate) fn parse(value: &str) -> Result<Self, SamplerError> {
         match value {
             "heuristic" => Ok(Self::Heuristic),
-            "exact_local" => Ok(Self::ExactLocal),
-            "exact_local_fallback" => Ok(Self::ExactLocalFallback),
-            "exact_local_depth3" => Ok(Self::ExactLocalDepth3),
-            "forward_local_depth3" => Ok(Self::ForwardLocalDepth3),
-            "hybrid_local" => Ok(Self::HybridLocal),
-            "mixed_local" => Ok(Self::MixedLocal),
-            "projected_local" => Ok(Self::ProjectedLocal),
+            "surface" => Ok(Self::Surface),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'heuristic', 'exact_local', 'exact_local_fallback', \
-                 'exact_local_depth3', 'forward_local_depth3', 'hybrid_local', 'mixed_local', \
-                 or 'projected_local'"
-                    .to_string(),
+                "candidate_strategy must be 'surface' or 'heuristic'".to_string(),
             )),
         }
     }
@@ -144,8 +128,7 @@ pub struct TopKReport {
     pub contexts: u64,
     pub forward_candidate_evaluations: u64,
     pub backward_candidate_evaluations: u64,
-    pub exact_local_proposal_evaluations: u64,
-    pub heuristic_fallback_contexts: u64,
+    pub surface_proposal_evaluations: u64,
     pub continuation_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
@@ -157,7 +140,7 @@ pub struct TopKReport {
     pub backward_guidance_ns: u64,
     pub forward_search_ns: u64,
     pub continuation_guidance_ns: u64,
-    pub exact_local_proposal_ns: u64,
+    pub surface_proposal_ns: u64,
     pub seam_refresh_ns: u64,
     pub stitch_ns: u64,
     pub materialize_ns: u64,
@@ -171,7 +154,7 @@ pub struct TopKOptions {
     pub frontier_width: usize,
     pub proposal_limit_per_source: usize,
     pub candidate_strategy: CandidateStrategy,
-    pub local_projection_limit: usize,
+    pub surface_bins: usize,
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
     pub continuation_proposal_limit: usize,
@@ -232,8 +215,7 @@ impl TopKReport {
         self.contexts += other.contexts;
         self.forward_candidate_evaluations += other.forward_candidate_evaluations;
         self.backward_candidate_evaluations += other.backward_candidate_evaluations;
-        self.exact_local_proposal_evaluations += other.exact_local_proposal_evaluations;
-        self.heuristic_fallback_contexts += other.heuristic_fallback_contexts;
+        self.surface_proposal_evaluations += other.surface_proposal_evaluations;
         self.continuation_proposals += other.continuation_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
@@ -245,7 +227,7 @@ impl TopKReport {
         self.backward_guidance_ns += other.backward_guidance_ns;
         self.forward_search_ns += other.forward_search_ns;
         self.continuation_guidance_ns += other.continuation_guidance_ns;
-        self.exact_local_proposal_ns += other.exact_local_proposal_ns;
+        self.surface_proposal_ns += other.surface_proposal_ns;
         self.seam_refresh_ns += other.seam_refresh_ns;
         self.stitch_ns += other.stitch_ns;
         self.materialize_ns += other.materialize_ns;
@@ -399,6 +381,7 @@ fn forward_beam(
         context,
         scoring: inputs.scoring(),
         candidate_count,
+        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     let started = profile.then(Instant::now);
@@ -427,83 +410,23 @@ fn forward_beam(
                 anchor_slot: candidate_slot,
                 anchors: &parent.anchors,
             };
-            let exact_local_next = backward
+            let surface_next = backward
                 .guidance_frontiers
                 .get(layer + 1)
                 .and_then(|frontier| frontier.first())
                 .map(|&index| backward.nodes[index].zone);
             let unassigned = candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none());
-            let mut candidate_zones = match (inputs.options.candidate_strategy, exact_local_next) {
-                (
-                    CandidateStrategy::ExactLocal
-                    | CandidateStrategy::ExactLocalFallback
-                    | CandidateStrategy::HybridLocal
-                    | CandidateStrategy::ForwardLocalDepth3,
-                    Some(next_zone),
-                ) if unassigned => {
-                    let exact_local_started = profile.then(Instant::now);
+            let mut candidate_zones = match (inputs.options.candidate_strategy, surface_next) {
+                (CandidateStrategy::Surface, Some(next_zone)) if unassigned => {
+                    let surface_started = profile.then(Instant::now);
                     if context.steps[layer].fixed_destination.is_none() {
-                        report.exact_local_proposal_evaluations += destinations
+                        report.surface_proposal_evaluations += destinations
                             .domain(context.steps[layer].activity_id)
                             .map_or(0, |domain| domain.len() as u64);
                     }
-                    let result = exact_local_candidates(candidate_inputs, query, next_zone)?;
-                    if let Some(started) = exact_local_started {
-                        report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
-                    }
-                    if inputs.options.candidate_strategy == CandidateStrategy::HybridLocal {
-                        let mut result = result;
-                        result.extend(candidates(candidate_inputs, query, candidate_cache)?);
-                        result
-                    } else {
-                        result
-                    }
-                }
-                (CandidateStrategy::MixedLocal, Some(next_zone)) if unassigned => {
-                    let exact_local_started = profile.then(Instant::now);
-                    let local_inputs = CandidateInputs {
-                        candidate_count: 7,
-                        ..candidate_inputs
-                    };
-                    let heuristic_inputs = CandidateInputs {
-                        candidate_count: 8,
-                        ..candidate_inputs
-                    };
-                    if context.steps[layer].fixed_destination.is_none() {
-                        report.exact_local_proposal_evaluations += destinations
-                            .domain(context.steps[layer].activity_id)
-                            .map_or(0, |domain| domain.len() as u64);
-                    }
-                    let mut result = exact_local_candidates(local_inputs, query, next_zone)?;
-                    result.extend(candidates(heuristic_inputs, query, candidate_cache)?);
-                    if let Some(started) = exact_local_started {
-                        report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
-                    }
-                    result
-                }
-                (CandidateStrategy::ProjectedLocal, Some(next_zone)) if unassigned => {
-                    let exact_local_started = profile.then(Instant::now);
-                    let mut projected = candidates(candidate_inputs, query, candidate_cache)?;
-                    projected.extend(reverse_projection_candidates(
-                        graph,
-                        destinations,
-                        context,
-                        layer,
-                        next_zone,
-                        inputs.options.local_projection_limit,
-                        candidate_cache,
-                    )?);
-                    projected.sort_unstable();
-                    projected.dedup();
-                    report.exact_local_proposal_evaluations += projected.len() as u64;
-                    let result = exact_local_candidates_from(
-                        candidate_inputs,
-                        query,
-                        next_zone,
-                        &projected,
-                    )?;
-                    if let Some(started) = exact_local_started {
-                        report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
+                    let result = surface_candidates(candidate_inputs, query, next_zone)?;
+                    if let Some(started) = surface_started {
+                        report.surface_proposal_ns += started.elapsed().as_nanos() as u64;
                     }
                     result
                 }
@@ -722,6 +645,7 @@ fn refresh_stitch_frontier(
         context,
         scoring: inputs.scoring(),
         candidate_count,
+        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     if refresh_per_prefix == 0 {
@@ -866,6 +790,7 @@ fn backward_beam(
         context,
         scoring: inputs.scoring(),
         candidate_count,
+        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     let started = profile.then(Instant::now);
@@ -904,58 +829,7 @@ fn backward_beam(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| nodes[index].zone);
-            let reverse_candidates = if matches!(
-                inputs.options.candidate_strategy,
-                CandidateStrategy::ExactLocal
-                    | CandidateStrategy::ExactLocalFallback
-                    | CandidateStrategy::HybridLocal
-                    | CandidateStrategy::MixedLocal
-            ) {
-                let exact_local_started = profile.then(Instant::now);
-                if context.steps[layer].fixed_destination.is_none() {
-                    report.exact_local_proposal_evaluations += destinations
-                        .domain(context.steps[layer].activity_id)
-                        .map_or(0, |domain| domain.len() as u64);
-                }
-                let local_inputs =
-                    if inputs.options.candidate_strategy == CandidateStrategy::MixedLocal {
-                        CandidateInputs {
-                            candidate_count: 7,
-                            ..candidate_inputs
-                        }
-                    } else {
-                        candidate_inputs
-                    };
-                let result =
-                    exact_reverse_local_candidates(local_inputs, query, next_zone, next_next_zone)?;
-                if let Some(started) = exact_local_started {
-                    report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
-                }
-                if inputs.options.candidate_strategy == CandidateStrategy::HybridLocal {
-                    let mut result = result;
-                    result.extend(candidates(candidate_inputs, query, candidate_cache)?);
-                    result.sort_unstable();
-                    result.dedup();
-                    result
-                } else if inputs.options.candidate_strategy == CandidateStrategy::MixedLocal {
-                    let mut result = result;
-                    result.extend(candidates(
-                        CandidateInputs {
-                            candidate_count: 8,
-                            ..candidate_inputs
-                        },
-                        query,
-                        candidate_cache,
-                    )?);
-                    result.sort_unstable();
-                    result.dedup();
-                    result
-                } else {
-                    result
-                }
-            } else {
-                candidates(candidate_inputs, query, candidate_cache)?
-            };
+            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -1041,6 +915,7 @@ fn extend_backward_guidance(
         context,
         scoring: inputs.scoring(),
         candidate_count,
+        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     let started = profile.then(Instant::now);
@@ -1068,58 +943,7 @@ fn extend_backward_guidance(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
-            let reverse_candidates = if matches!(
-                inputs.options.candidate_strategy,
-                CandidateStrategy::ExactLocal
-                    | CandidateStrategy::ExactLocalFallback
-                    | CandidateStrategy::HybridLocal
-                    | CandidateStrategy::MixedLocal
-            ) {
-                let exact_local_started = profile.then(Instant::now);
-                if context.steps[layer].fixed_destination.is_none() {
-                    report.exact_local_proposal_evaluations += destinations
-                        .domain(context.steps[layer].activity_id)
-                        .map_or(0, |domain| domain.len() as u64);
-                }
-                let local_inputs =
-                    if inputs.options.candidate_strategy == CandidateStrategy::MixedLocal {
-                        CandidateInputs {
-                            candidate_count: 7,
-                            ..candidate_inputs
-                        }
-                    } else {
-                        candidate_inputs
-                    };
-                let result =
-                    exact_reverse_local_candidates(local_inputs, query, next_zone, next_next_zone)?;
-                if let Some(started) = exact_local_started {
-                    report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
-                }
-                if inputs.options.candidate_strategy == CandidateStrategy::HybridLocal {
-                    let mut result = result;
-                    result.extend(candidates(candidate_inputs, query, candidate_cache)?);
-                    result.sort_unstable();
-                    result.dedup();
-                    result
-                } else if inputs.options.candidate_strategy == CandidateStrategy::MixedLocal {
-                    let mut result = result;
-                    result.extend(candidates(
-                        CandidateInputs {
-                            candidate_count: 8,
-                            ..candidate_inputs
-                        },
-                        query,
-                        candidate_cache,
-                    )?);
-                    result.sort_unstable();
-                    result.dedup();
-                    result
-                } else {
-                    result
-                }
-            } else {
-                candidates(candidate_inputs, query, candidate_cache)?
-            };
+            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -1323,17 +1147,10 @@ fn search_context(
     }
     let build_started = options.profile.then(Instant::now);
     let problem = build_scoring_problem(context)?;
-    let options = if matches!(
-        options.candidate_strategy,
-        CandidateStrategy::ExactLocalDepth3 | CandidateStrategy::ForwardLocalDepth3
-    ) {
+    let options = if options.candidate_strategy == CandidateStrategy::Surface {
         TopKOptions {
-            candidate_strategy: if context.steps.len() == 3 {
-                match options.candidate_strategy {
-                    CandidateStrategy::ExactLocalDepth3 => CandidateStrategy::ExactLocal,
-                    CandidateStrategy::ForwardLocalDepth3 => CandidateStrategy::ForwardLocalDepth3,
-                    _ => unreachable!("matched depth-gated strategy"),
-                }
+            candidate_strategy: if context.steps.len() <= 4 {
+                CandidateStrategy::Surface
             } else {
                 CandidateStrategy::Heuristic
             },
@@ -1476,27 +1293,7 @@ pub fn search_top_k_all(
     let compute = || {
         contexts
             .par_iter()
-            .map(|context| {
-                let result = search_context(graph, destinations, context, parameters, options);
-                if matches!(result, Err(SamplerError::NoFeasibleSequence { .. }))
-                    && options.candidate_strategy == CandidateStrategy::ExactLocalFallback
-                {
-                    let (table, mut report) = search_context(
-                        graph,
-                        destinations,
-                        context,
-                        parameters,
-                        TopKOptions {
-                            candidate_strategy: CandidateStrategy::Heuristic,
-                            ..options
-                        },
-                    )?;
-                    report.heuristic_fallback_contexts = 1;
-                    Ok((table, report))
-                } else {
-                    result
-                }
-            })
+            .map(|context| search_context(graph, destinations, context, parameters, options))
             .collect::<Vec<_>>()
     };
     let results = if let Some(n_threads) = n_threads {

@@ -2,7 +2,8 @@
 
 ## Current configuration
 
-`top_k()` on Grand Geneve iteration-5 inputs: `frontier_width=32`,
+Historical reference: `top_k()` on Grand Geneve iteration-5 inputs before the
+active binned-surface proposal: `frontier_width=32`,
 `proposal_limit_per_source=16`, `continuation_state_limit=1`,
 `continuation_proposal_limit=1`, `seam_refresh_per_prefix=1`, `top_k=10`.
 

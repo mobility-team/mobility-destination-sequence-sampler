@@ -67,11 +67,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
     parser.add_argument(
         "--candidate-strategy",
-        choices=("heuristic", "exact_local", "exact_local_fallback", "exact_local_depth3", "forward_local_depth3", "hybrid_local", "mixed_local", "projected_local"),
-        default="heuristic",
-        help="bounded proposal policy (default: heuristic)",
+        choices=("surface", "heuristic"),
+        default="surface",
+        help="bounded proposal policy (default: surface)",
     )
-    parser.add_argument("--local-projection-limit", type=int, default=256)
+    parser.add_argument("--surface-bins", type=int, choices=(2, 4), default=2)
     parser.add_argument("--stitch-bias", type=int, default=0)
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
@@ -730,7 +730,7 @@ def compare_seed(
                     frontier_width=args.frontier_width,
                     proposal_limit_per_source=args.proposal_limit_per_source,
                     candidate_strategy=args.candidate_strategy,
-                    local_projection_limit=args.local_projection_limit,
+                    surface_bins=args.surface_bins,
                     stitch_bias=args.stitch_bias,
                     continuation_state_limit=args.continuation_state_limit,
                     continuation_proposal_limit=args.continuation_proposal_limit,
