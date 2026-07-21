@@ -26,6 +26,13 @@ a bounded failure. It is the quality reference, not an active policy.
 zones of that successor. It failed the known five-step context 43094 and
 reduced the short-cohort `Mass@10` to 0.550; rejected.
 
+`hybrid_local`, `mixed_local`, and `exact_local_fallback` were also rejected:
+they either collapsed bounded feasibility by widening/rebalancing a frontier,
+or erased the quality gain through frequent fallback. A depth-3-only
+exact-local gate gave the best current global pilot (`Mass@10` 0.741 versus
+0.727 heuristic; 93.7% oracle-certifiable population), but reduced throughput
+cohort completion (746 versus 787 / 1,000). It is not the default.
+
 Next: a configurable binned surface. Precompute compact memberships for
 activity potential, inbound cost/time pressure, and outbound time pressure;
 rank bin upper bounds per rigidity query, expand several high-bound regions,

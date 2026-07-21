@@ -9,7 +9,7 @@ use crate::scoring::{score_local_weight, ScoringInputs};
 
 #[derive(Default)]
 pub(super) struct CandidateCache {
-    base: HashMap<(usize, usize, bool), Vec<usize>>,
+    base: HashMap<(usize, usize, bool, usize), Vec<usize>>,
     reverse_projection: HashMap<(usize, usize), Vec<usize>>,
 }
 
@@ -115,7 +115,12 @@ pub(super) fn candidates(
     if let Some(zone) = query.anchor_slot.and_then(|slot| query.anchors[slot]) {
         return Ok(vec![zone]);
     }
-    let key = (query.layer, query.reference_zone, query.reverse);
+    let key = (
+        query.layer,
+        query.reference_zone,
+        query.reverse,
+        inputs.candidate_count,
+    );
     let base = if let Some(base) = cache.base.get(&key) {
         base
     } else {

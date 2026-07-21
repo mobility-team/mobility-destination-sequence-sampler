@@ -182,6 +182,10 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
         "exact_local_proposals_evaluated",
         report.exact_local_proposal_evaluations,
     )?;
+    result.set_item(
+        "heuristic_fallback_contexts",
+        report.heuristic_fallback_contexts,
+    )?;
     result.set_item("continuation_proposals", report.continuation_proposals)?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
