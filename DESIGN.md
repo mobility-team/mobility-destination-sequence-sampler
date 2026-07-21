@@ -31,7 +31,8 @@ api.rs -> search_top_k_all() -> search_context()
 ```
 
 - `top_k/mod.rs`: frontiers, continuation guidance, refresh, stitch.
-- `top_k/candidates.rs`: heuristic and binned-surface proposals plus cache.
+- `top_k/candidates.rs`: heuristic and binned-surface proposals/cache;
+  `top_k/mod.rs` also owns factor-map proposal composition.
 - New passes take `SearchInputs` + `SearchScratch`, not long argument lists.
 - `oracle.rs`: exact top-K oracle; it proves or fails at
   `max_states`, never approximates.
@@ -46,5 +47,5 @@ factor i = destination[i - 1] -> destination[i] -> destination[i + 1]
 ```
 
 Forward-to-backward refresh may add activity-correct states but must not evict
-the reverse/home-oriented frontier. The surface changes proposal support only;
-every retained factor still uses the shared exact scorer.
+the reverse/home-oriented frontier. Proposal policies, including factor maps,
+change support only; every retained factor still uses the shared exact scorer.

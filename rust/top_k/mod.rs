@@ -166,6 +166,7 @@ pub struct TopKOptions {
     pub proposal_limit_per_source: usize,
     pub candidate_strategy: CandidateStrategy,
     pub surface_bins: usize,
+    pub factor_map_max_depth: usize,
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
     pub continuation_proposal_limit: usize,
@@ -498,6 +499,7 @@ fn forward_beam(
     let anchor_slots = &inputs.anchor_slots;
     let continuation_state_limit = inputs.options.continuation_state_limit;
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
+    let factor_map_guidance_limit = continuation_state_limit.max(4);
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let factor_map_cache = &mut scratch.factor_map_cache;
@@ -577,7 +579,7 @@ fn forward_beam(
                     } else {
                         &backward.frontiers[layer + 1]
                     };
-                    let map_count = factor_suffixes.len().min(4);
+                    let map_count = factor_suffixes.len().min(factor_map_guidance_limit);
                     if context.steps[layer].fixed_destination.is_none() {
                         report.factor_map_destination_evaluations += destinations
                             .domain(context.steps[layer].activity_id)
@@ -1076,7 +1078,7 @@ fn extend_backward_guidance(
     let destinations = inputs.destinations;
     let context = inputs.context;
     let guidance_width = if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
-        4
+        inputs.options.continuation_state_limit.max(4)
     } else {
         inputs.options.continuation_state_limit
     };
@@ -1324,11 +1326,12 @@ fn search_context(
     }
     let build_started = options.profile.then(Instant::now);
     let problem = build_scoring_problem(context)?;
-    let options = if matches!(
-        options.candidate_strategy,
-        CandidateStrategy::Surface | CandidateStrategy::FactorMap
-    ) && context.steps.len() > 4
-    {
+    let use_heuristic = match options.candidate_strategy {
+        CandidateStrategy::Surface => context.steps.len() > 4,
+        CandidateStrategy::FactorMap => context.steps.len() > options.factor_map_max_depth,
+        CandidateStrategy::Heuristic => false,
+    };
+    let options = if use_heuristic {
         TopKOptions {
             candidate_strategy: CandidateStrategy::Heuristic,
             ..options

@@ -38,7 +38,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=32, proposal_limit_per_source=16, candidate_strategy="surface", surface_bins=2, stitch_bias=0, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=32, proposal_limit_per_source=16, candidate_strategy="factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=0, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -53,6 +53,7 @@ impl DestinationPlanSearch {
         proposal_limit_per_source: usize,
         candidate_strategy: &str,
         surface_bins: usize,
+        factor_map_max_depth: usize,
         stitch_bias: i32,
         continuation_state_limit: usize,
         continuation_proposal_limit: usize,
@@ -79,6 +80,12 @@ impl DestinationPlanSearch {
                 SamplerError::InvalidInput("surface_bins must be 2 or 4".to_string()).into(),
             );
         }
+        if factor_map_max_depth < 2 {
+            return Err(SamplerError::InvalidInput(
+                "factor_map_max_depth must be at least 2".to_string(),
+            )
+            .into());
+        }
         let contexts = parse_reference_contexts(steps, initial_locations)?;
         let candidate_strategy = CandidateStrategy::parse(candidate_strategy)?;
         let parameters = Parameters {
@@ -100,6 +107,7 @@ impl DestinationPlanSearch {
                     proposal_limit_per_source,
                     candidate_strategy,
                     surface_bins,
+                    factor_map_max_depth,
                     stitch_bias,
                     continuation_state_limit,
                     continuation_proposal_limit,

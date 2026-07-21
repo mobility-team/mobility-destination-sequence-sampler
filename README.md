@@ -12,9 +12,9 @@ oracle. Mobility prepares inputs; this package owns destination choice.
 | `top_k()` | Bounded bidirectional search. Approximate, exact-score-ranked returned plans. |
 | `exact_top_k()` | Small-context oracle. Proves the requested top-K or raises at `max_states`. |
 
-`top_k()` uses bounded binned-surface proposals for short plans and bounded
-attractive, OD-near, and deterministic exploration proposals for longer plans.
-proposals; it carries repeated anchors and ranks stitched complete plans by
+`top_k()` uses unbinned exact factor-map proposals through depth 5 and bounded
+attractive, OD-near, and deterministic exploration proposals for longer plans;
+it carries repeated anchors and ranks stitched complete plans by
 the full rigidity-aware utility. See [`DESIGN.md`](DESIGN.md) for schemas and
 invariants.
 

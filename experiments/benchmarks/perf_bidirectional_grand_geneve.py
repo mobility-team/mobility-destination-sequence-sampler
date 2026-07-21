@@ -43,9 +43,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidate-strategy",
         choices=("surface", "factor_map", "heuristic"),
-        default="surface",
+        default="factor_map",
     )
     parser.add_argument("--surface-bins", type=int, choices=(2, 4), default=2)
+    parser.add_argument("--factor-map-max-depth", type=int, default=5)
     parser.add_argument("--stitch-bias", type=int, default=0)
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
@@ -127,6 +128,7 @@ def main() -> None:
         proposal_limit_per_source=args.proposal_limit_per_source,
         candidate_strategy=args.candidate_strategy,
         surface_bins=args.surface_bins,
+        factor_map_max_depth=args.factor_map_max_depth,
         stitch_bias=args.stitch_bias,
         continuation_state_limit=args.continuation_state_limit,
         continuation_proposal_limit=args.continuation_proposal_limit,
@@ -148,6 +150,7 @@ def main() -> None:
         f"proposal-limit={args.proposal_limit_per_source} "
         f"candidate-strategy={args.candidate_strategy} "
         f"surface-bins={args.surface_bins} "
+        f"factor-map-max-depth={args.factor_map_max_depth} "
         f"continuation={args.continuation_state_limit}x{args.continuation_proposal_limit} "
         f"seam-refresh={args.seam_refresh_per_prefix} "
         f"threads={args.threads}"
