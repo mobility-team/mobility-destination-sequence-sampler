@@ -14,7 +14,20 @@ reverse frontier without evicting home-oriented states. It is the current
 quality improvement. The exact oracle measures retained conditional exact
 top-K mass and separates missing proposal support from beam loss.
 
-Current limitation: good plans can be absent before beam ranking because the
-first forward proposal pool lacks a destination that is jointly good for its
-incoming and later legs. Next: test a small continuation-aware early proposal
-source; retain it only if oracle mass rises at acceptable cost.
+## Candidate experiments (2026-07-21)
+
+`candidate_strategy="exact_local"` scans an activity domain against a known
+backward successor and retains the best 34 exact local scores. On a two-per-
+stratum Grand Geneve oracle audit it raised conditional `Mass@10` from 0.700
+to 0.795, but made 1,000-context throughput 0.262 s versus 0.160 s and added
+a bounded failure. It is the quality reference, not an active policy.
+
+`projected_local` re-ranked the heuristic pool plus 256 cheap predecessor
+zones of that successor. It failed the known five-step context 43094 and
+reduced the short-cohort `Mass@10` to 0.550; rejected.
+
+Next: a configurable binned surface. Precompute compact memberships for
+activity potential, inbound cost/time pressure, and outbound time pressure;
+rank bin upper bounds per rigidity query, expand several high-bound regions,
+then exact-score their zones. Preserve region diversity and fall back to more
+regions before widening a beam.

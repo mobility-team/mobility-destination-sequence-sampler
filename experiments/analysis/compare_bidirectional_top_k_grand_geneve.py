@@ -1,9 +1,8 @@
 """Read-only top-K error check against the exact raw-zone oracle.
 
-This intentionally uses short real contexts but keeps the complete raw-zone
-domain. A context is included only when ``DestinationPlanSearch.exact_top_k`` proves its
-oracle result within ``--max-states``; a state-limit error is reported and the
-context is skipped rather than treated as an approximate oracle result.
+This keeps the complete raw-zone domain. The default comparison targets short,
+oracle-proven contexts; ``--contexts-per-stratum`` instead audits all supported
+depths and retains oracle failures as coverage data.
 """
 
 from __future__ import annotations
@@ -41,20 +40,42 @@ def parse_args() -> argparse.Namespace:
         default=50,
         help="short contexts to try before stopping after --contexts proven cases",
     )
+    parser.add_argument(
+        "--contexts-per-stratum",
+        type=int,
+        help=(
+            "audit mode: sample this many contexts from every depth/anchor stratum; "
+            "all layers >= 3 are included and oracle failures are retained"
+        ),
+    )
     parser.add_argument("--max-layers", type=int, default=4)
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        action="append",
+        dest="top_ks",
+        help="bounded result count; repeat to compare several K values (default: 10)",
+    )
     parser.add_argument(
         "--oracle-depth",
         type=int,
         default=100,
-        help="exact plans retained as the conditional probability-mass support",
+        help="fixed exact-plan support used to normalize all requested K values",
     )
     parser.add_argument("--max-states", type=int, default=2_000_000)
     parser.add_argument("--frontier-width", type=int, default=32)
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
+    parser.add_argument(
+        "--candidate-strategy",
+        choices=("heuristic", "exact_local", "projected_local"),
+        default="heuristic",
+        help="bounded proposal policy (default: heuristic)",
+    )
+    parser.add_argument("--local-projection-limit", type=int, default=256)
     parser.add_argument("--stitch-bias", type=int, default=0)
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
+    parser.add_argument("--archetype-strata-limit", type=int, default=12)
     parser.add_argument(
         "--trace-context",
         type=int,
@@ -65,51 +86,79 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="show every returned plan and every missed exact top-K plan",
     )
-    parser.add_argument("--exploration-seed", type=int, default=42)
+    parser.add_argument(
+        "--exploration-seed",
+        type=int,
+        action="append",
+        dest="exploration_seeds",
+        help="candidate-context hash seed; repeat for independent validation cohorts",
+    )
     parser.add_argument("--threads", type=int, default=8)
     return parser.parse_args()
 
 
-def eligible_context_ids(steps: pl.DataFrame, args: argparse.Namespace) -> list[int]:
-    """Select short contexts accepted by the current bidirectional contract."""
-    if args.contexts <= 0 or args.candidate_contexts <= 0:
+def eligible_context_ids(
+    profiles: pl.DataFrame, args: argparse.Namespace, exploration_seed: int
+) -> list[int]:
+    """Select either a bounded comparison cohort or one audit cohort per stratum."""
+    if args.contexts_per_stratum is not None:
+        if args.contexts_per_stratum <= 0:
+            raise ValueError("--contexts-per-stratum must be positive")
+    elif args.contexts <= 0 or args.candidate_contexts <= 0:
         raise ValueError("--contexts and --candidate-contexts must be positive")
-    if args.max_layers < 3:
-        raise ValueError("--max-layers must be at least three")
+    if args.max_layers < 2:
+        raise ValueError("--max-layers must be at least two")
     if args.trace_context is not None:
-        if steps.filter(pl.col("context_id") == args.trace_context).is_empty():
+        if profiles.filter(pl.col("context_id") == args.trace_context).is_empty():
             raise ValueError(f"context {args.trace_context} does not exist")
         return [args.trace_context]
+    minimum_layers = 2 if args.contexts_per_stratum is not None else 3
+    eligible = profiles.filter(pl.col("layers") >= minimum_layers).with_columns(
+        sample_order=pl.col("context_id").hash(seed=exploration_seed)
+    )
     selected = (
-        steps.group_by("context_id")
-        .agg(
-            layers=pl.len(),
-            variable_anchors=(
-                pl.col("fixed_destination").is_null()
-                & pl.col("anchor_id").is_not_null()
-            ).sum(),
-            fixed_layers=pl.col("fixed_destination").is_not_null().sum(),
-            terminal_fixed=pl.col("fixed_destination")
-            .sort_by("layer")
-            .last()
-            .is_not_null(),
-        )
-        .filter(
-            (pl.col("layers") >= 3)
-            & (pl.col("layers") <= args.max_layers)
-            & (pl.col("variable_anchors") == 0)
-            & (pl.col("fixed_layers") == 1)
-            & pl.col("terminal_fixed")
-        )
-        .with_columns(
-            sample_order=pl.col("context_id").hash(seed=args.exploration_seed)
-        )
+        eligible.sort(["audit_stratum", "sample_order"])
+        .group_by("audit_stratum", maintain_order=True)
+        .head(args.contexts_per_stratum)
+        if args.contexts_per_stratum is not None
+        else eligible.filter(pl.col("layers") <= args.max_layers)
         .sort("sample_order")
         .head(args.candidate_contexts)
     )
     if selected.is_empty():
         raise ValueError("no eligible short contexts")
     return [int(context_id) for context_id in selected["context_id"].to_list()]
+
+
+def context_profiles(steps: pl.DataFrame) -> pl.DataFrame:
+    """Compact plan-type fields used for sampling and stratified reporting."""
+    anchored = pl.col("fixed_destination").is_not_null() | pl.col("anchor_id").is_not_null()
+    profiles = steps.group_by("context_id").agg(
+        layers=pl.len(),
+        anchor_count=anchored.sum(),
+        anchor_activity_types=pl.col("activity_id")
+        .filter(anchored)
+        .n_unique(),
+    )
+    return (
+        profiles.with_columns(
+            depth_band=pl.when(pl.col("layers") >= 6)
+            .then(pl.lit("6+"))
+            .otherwise(pl.col("layers").cast(pl.String)),
+            anchor_count_band=pl.when(pl.col("anchor_count") >= 3)
+            .then(pl.lit("3+"))
+            .otherwise(pl.col("anchor_count").cast(pl.String)),
+            anchor_type_band=pl.when(pl.col("anchor_activity_types") >= 2)
+            .then(pl.lit("2+"))
+            .otherwise(pl.col("anchor_activity_types").cast(pl.String)),
+        )
+        .with_columns(
+            audit_stratum=pl.concat_str(
+                ["depth_band", "anchor_count_band", "anchor_type_band"],
+                separator="|",
+            )
+        )
+    )
 
 
 def ranked_plans(table: pl.DataFrame) -> list[tuple[tuple[int, ...], float]]:
@@ -139,29 +188,93 @@ def quantile(values: list[float], probability: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def print_distribution(label: str, values: list[float]) -> None:
-    """Print a compact distribution report, including its high-error tail."""
-    if not values:
+def print_distribution_table(label: str, values_by_top_k: dict[int, list[float]]) -> None:
+    """Print full distribution detail with one concise row per requested K."""
+    print(f"\n{label}")
+    print("  K | mean  | min   | p25   | p50   | p75   | p90   | p95   | p99   | max   | zero")
+    for top_k, values in values_by_top_k.items():
+        if not values:
+            continue
+        zero = sum(math.isclose(value, 0.0, abs_tol=1e-9) for value in values)
+        print(
+            f"{top_k:3d} | {sum(values) / len(values):.3f} | {min(values):.3f} "
+            f"| {quantile(values, 0.25):.3f} | {quantile(values, 0.50):.3f} "
+            f"| {quantile(values, 0.75):.3f} | {quantile(values, 0.90):.3f} "
+            f"| {quantile(values, 0.95):.3f} | {quantile(values, 0.99):.3f} "
+            f"| {max(values):.3f} | {zero}/{len(values)}"
+        )
+
+
+def append_stratum_metrics(
+    by_top_k: dict[int, dict[str, list[float]]],
+    stratum: str,
+    top_k: int,
+    metrics: dict[str, float],
+) -> None:
+    by_top_k[top_k].setdefault(stratum, []).append(metrics["retained_top_k_mass"])
+
+
+def print_stratum_table(
+    label: str, by_top_k: dict[int, dict[str, list[float]]], top_ks: list[int], limit: int
+) -> None:
+    """Print mean Mass@K for common proven plan archetypes."""
+    first_top_k = top_ks[0]
+    counts = {stratum: len(values) for stratum, values in by_top_k[first_top_k].items()}
+    ranked = sorted(counts, key=lambda stratum: (-counts[stratum], stratum))[:limit]
+    print(f"\n{label} (mean Mass@K)")
+    print("stratum | n | " + " | ".join(f"K={top_k}" for top_k in top_ks))
+    for stratum in ranked:
+        values = [
+            sum(by_top_k[top_k][stratum]) / counts[stratum] for top_k in top_ks
+        ]
+        print(f"{stratum} | {counts[stratum]} | " + " | ".join(f"{value:.3f}" for value in values))
+    if len(counts) > len(ranked):
+        print(f"... {len(counts) - len(ranked)} rarer strata omitted")
+
+
+def print_audit_coverage(
+    population_by_stratum: dict[str, int], outcomes: dict[str, dict[str, int]]
+) -> None:
+    """Show whether the sampled strata support an unbiased global estimate."""
+    print("\nGlobal audit coverage")
+    print("stratum | population | sampled | oracle solved | bounded complete | state cap | infeasible | oracle error | bounded failed")
+    for stratum in sorted(population_by_stratum):
+        outcome = outcomes[stratum]
+        print(
+            f"{stratum} | {population_by_stratum[stratum]} | {outcome['sampled']} "
+            f"| {outcome['oracle_completed']} | {outcome['proven']} | {outcome['state_limited']} "
+            f"| {outcome['infeasible']} | {outcome['oracle_error']} | {outcome['bounded_failed']}"
+        )
+
+
+def print_global_audit_estimate(
+    population_by_stratum: dict[str, int],
+    outcomes: dict[str, dict[str, int]],
+    metrics_by_top_k: dict[int, dict[str, list[float]]],
+) -> None:
+    """Post-stratify oracle-certifiable strata; bounded failures carry zero mass."""
+    covered = [
+        stratum for stratum, outcome in outcomes.items() if outcome["oracle_completed"]
+    ]
+    covered_population = sum(population_by_stratum[stratum] for stratum in covered)
+    population = sum(population_by_stratum.values())
+    if not covered_population:
         return
-    summary = {
-        "min": min(values),
-        "p25": quantile(values, 0.25),
-        "p50": quantile(values, 0.50),
-        "p75": quantile(values, 0.75),
-        "p90": quantile(values, 0.90),
-        "p95": quantile(values, 0.95),
-        "p99": quantile(values, 0.99),
-        "max": max(values),
-    }
-    zero = sum(math.isclose(value, 0.0, abs_tol=1e-9) for value in values)
     print(
-        f"{label}: n={len(values)} mean={sum(values) / len(values):.6f} "
-        f"min={summary['min']:.6f} p25={summary['p25']:.6f} "
-        f"p50={summary['p50']:.6f} p75={summary['p75']:.6f} "
-        f"p90={summary['p90']:.6f} p95={summary['p95']:.6f} "
-        f"p99={summary['p99']:.6f} max={summary['max']:.6f} "
-        f"zero={zero}/{len(values)}"
+        "\nPilot quality estimate (post-stratified over oracle-certifiable strata; "
+        f"population coverage={covered_population / population:.1%})"
     )
+    print("K | Mass@K | Mass@oracle-support")
+    for top_k, metrics_by_stratum in metrics_by_top_k.items():
+        weighted = lambda metric: sum(
+            population_by_stratum[stratum] * sum(metrics_by_stratum[stratum][metric])
+            / len(metrics_by_stratum[stratum][metric])
+            for stratum in covered
+        ) / population
+        print(
+            f"{top_k} | {weighted('retained_top_k_mass'):.3f} "
+            f"| {weighted('retained_oracle_mass'):.3f}"
+        )
 
 
 def retained_probability_mass(
@@ -175,6 +288,34 @@ def retained_probability_mass(
     weights = [(zones, math.exp(score - maximum_utility)) for zones, score in oracle]
     normalizer = sum(weight for _, weight in weights)
     return sum(weight for zones, weight in weights if zones in returned_zones) / normalizer
+
+
+def bounded_failure_metrics(
+    oracle: list[tuple[tuple[int, ...], float]], top_k: int
+) -> dict[str, float]:
+    """Use zero retained mass when the bounded search returns no complete plan."""
+    oracle_top_k = oracle[:top_k]
+    return {
+        "recall": 0.0,
+        "retained_top_k_mass": 0.0,
+        "retained_oracle_mass": 0.0,
+        "top_k_oracle_mass": retained_probability_mass(
+            oracle, {zones for zones, _ in oracle_top_k}
+        ),
+        "top_k_mass_efficiency": 0.0,
+        "missed_base_pool_mass": 0.0,
+        "missed_beam_mass": 0.0,
+    }
+
+
+def oracle_failure_kind(error: ValueError) -> str:
+    """Keep oracle limits, infeasibility, and internal errors distinct in audits."""
+    message = str(error)
+    if "exceeded max_states" in message:
+        return "state_limited"
+    if "no feasible destination sequence" in message:
+        return "infeasible"
+    return "oracle_error"
 
 
 def stitch_layer_index(step_count: int, stitch_bias: int) -> int:
@@ -441,14 +582,14 @@ def show_context(
         else:
             missed_base_pool_mass += probability
             missed_diagnoses[zones] = "not-in-base-pool"
-    print(
-        f"context={context_id} oracle-top-k={len(oracle_top_k)} "
-        f"bounded={len(bounded)} recall@{top_k}={hits}/{len(oracle_top_k)} "
-        f"retained-top-{top_k}-mass={retained_top_k_mass:.4f} "
-        f"retained-oracle-{len(oracle)}-mass={retained_oracle_mass:.4f} "
-        f"exact-states={states_pushed}"
-    )
     if verbose:
+        print(
+            f"context={context_id} oracle-top-k={len(oracle_top_k)} "
+            f"bounded={len(bounded)} recall@{top_k}={hits}/{len(oracle_top_k)} "
+            f"retained-top-{top_k}-mass={retained_top_k_mass:.4f} "
+            f"retained-oracle-{len(oracle)}-mass={retained_oracle_mass:.4f} "
+            f"exact-states={states_pushed}"
+        )
         for rank, (zones, score) in enumerate(bounded, start=1):
             oracle_position = oracle_rank.get(zones)
             position = (
@@ -479,37 +620,56 @@ def show_context(
     }
 
 
-def main() -> None:
-    args = parse_args()
-    if args.top_k <= 0 or args.oracle_depth < args.top_k:
-        raise ValueError("--top-k must be positive and --oracle-depth must be at least --top-k")
-    files = resolve_snapshot_files(args.group_day_trips_folder)
-    print("Preparing cached Grand Geneve inputs (read-only)...")
-    od_costs = prepare_od_costs(files["transport_costs"], files["demand_groups"])
-    destination_inputs = prepare_destination_inputs(
-        files["destination_saturation"], files["demand_groups"]
-    )
-    steps, initial_locations, _ = prepare_complete_contexts(
-        activity_sequences_path=files["activity_sequences"],
-        survey_plan_steps_path=files["survey_plan_steps"],
-        demand_groups_path=files["demand_groups"],
-        activity_dur_path=files["activity_dur"],
-    )
-    search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
-
+def compare_seed(
+    args: argparse.Namespace,
+    top_ks: list[int],
+    exploration_seed: int,
+    search: DestinationPlanSearch,
+    steps: pl.DataFrame,
+    initial_locations: pl.DataFrame,
+    od_costs: pl.DataFrame,
+    destination_inputs: pl.DataFrame,
+    profiles: pl.DataFrame,
+    profile_by_context: dict[int, tuple[int, int, int, str]],
+    population_by_stratum: dict[str, int],
+) -> None:
     proven = 0
     skipped = 0
-    recalls = []
-    retained_top_k_masses = []
-    retained_oracle_masses = []
-    top_k_oracle_masses = []
-    top_k_mass_efficiencies = []
-    missed_base_pool_masses = []
-    missed_beam_masses = []
+    audit_mode = args.contexts_per_stratum is not None
+    audit_outcomes = {
+        stratum: {
+            "sampled": 0,
+            "oracle_completed": 0,
+            "proven": 0,
+            "state_limited": 0,
+            "infeasible": 0,
+            "oracle_error": 0,
+            "bounded_failed": 0,
+        }
+        for stratum in population_by_stratum
+    }
+    metrics_by_top_k = {
+        top_k: {
+            "recall": [],
+            "retained_top_k_mass": [],
+            "retained_oracle_mass": [],
+            "top_k_oracle_mass": [],
+            "top_k_mass_efficiency": [],
+            "missed_base_pool_mass": [],
+            "missed_beam_mass": [],
+        }
+        for top_k in top_ks
+    }
     exact_search_seconds = 0.0
-    bounded_search_seconds = 0.0
+    bounded_search_seconds = {top_k: 0.0 for top_k in top_ks}
+    layer_metrics = {top_k: {} for top_k in top_ks}
+    archetype_metrics = {top_k: {} for top_k in top_ks}
+    audit_metrics = {top_k: {} for top_k in top_ks}
     started = time.perf_counter()
-    for context_id in eligible_context_ids(steps, args):
+    for context_id in eligible_context_ids(profiles, args, exploration_seed):
+        layers, anchor_count, anchor_activity_types, audit_stratum = profile_by_context[context_id]
+        if audit_mode:
+            audit_outcomes[audit_stratum]["sampled"] += 1
         context_steps = steps.filter(pl.col("context_id") == context_id)
         context_initial = initial_locations.filter(pl.col("context_id") == context_id)
         try:
@@ -528,33 +688,14 @@ def main() -> None:
             exact_search_seconds += time.perf_counter() - oracle_started
         except ValueError as error:
             skipped += 1
-            print(f"context={context_id} oracle skipped: {error}")
-            continue
-        try:
-            bounded_started = time.perf_counter()
-            bounded_table, _ = search.top_k(
-                steps=context_steps,
-                initial_locations=context_initial,
-                logit_scale=LOGIT_SCALE,
-                update_plan_timings=True,
-                use_shadow_prices=True,
-                exploration_seed=args.exploration_seed,
-                frontier_width=args.frontier_width,
-                proposal_limit_per_source=args.proposal_limit_per_source,
-                stitch_bias=args.stitch_bias,
-                continuation_state_limit=args.continuation_state_limit,
-                continuation_proposal_limit=args.continuation_proposal_limit,
-                top_k=args.top_k,
-                n_threads=1,
-                skip_infeasible=False,
-            )
-            bounded_search_seconds += time.perf_counter() - bounded_started
-        except ValueError as error:
-            skipped += 1
-            print(f"context={context_id} bounded search failed: {error}")
+            if audit_mode:
+                audit_outcomes[audit_stratum][oracle_failure_kind(error)] += 1
+            if args.verbose:
+                print(f"context={context_id} oracle skipped: {error}")
             continue
         oracle = ranked_plans(oracle_table)
-        bounded = ranked_plans(bounded_table)
+        if audit_mode:
+            audit_outcomes[audit_stratum]["oracle_completed"] += 1
         if args.trace_context == context_id:
             trace_oracle_candidate_coverage(
                 context_steps,
@@ -563,7 +704,7 @@ def main() -> None:
                 od_costs,
                 destination_inputs,
                 args.proposal_limit_per_source,
-                args.top_k,
+                max(top_ks),
                 args.stitch_bias,
             )
             trace_first_layer_and_plan_components(
@@ -573,67 +714,184 @@ def main() -> None:
                 oracle,
                 od_costs,
                 destination_inputs,
-                args.top_k,
+                max(top_ks),
             )
-        metrics = show_context(
-            context_id,
-            oracle,
-            bounded,
-            args.top_k,
-            oracle_report["states_pushed"],
-            context_steps,
-            int(context_initial.item(0, "initial_zone")),
-            od_costs,
-            destination_inputs,
-            args.proposal_limit_per_source,
-            args.stitch_bias,
-            args.verbose or args.trace_context is not None,
-        )
-        recalls.append(metrics["recall"])
-        retained_top_k_masses.append(metrics["retained_top_k_mass"])
-        retained_oracle_masses.append(metrics["retained_oracle_mass"])
-        top_k_oracle_masses.append(metrics["top_k_oracle_mass"])
-        top_k_mass_efficiencies.append(metrics["top_k_mass_efficiency"])
-        missed_base_pool_masses.append(metrics["missed_base_pool_mass"])
-        missed_beam_masses.append(metrics["missed_beam_mass"])
+        context_metrics = {}
+        for top_k in top_ks:
+            try:
+                bounded_started = time.perf_counter()
+                bounded_table, _ = search.top_k(
+                    steps=context_steps,
+                    initial_locations=context_initial,
+                    logit_scale=LOGIT_SCALE,
+                    update_plan_timings=True,
+                    use_shadow_prices=True,
+                    exploration_seed=exploration_seed,
+                    frontier_width=args.frontier_width,
+                    proposal_limit_per_source=args.proposal_limit_per_source,
+                    candidate_strategy=args.candidate_strategy,
+                    local_projection_limit=args.local_projection_limit,
+                    stitch_bias=args.stitch_bias,
+                    continuation_state_limit=args.continuation_state_limit,
+                    continuation_proposal_limit=args.continuation_proposal_limit,
+                    top_k=top_k,
+                    n_threads=1,
+                    skip_infeasible=False,
+                )
+                bounded_search_seconds[top_k] += time.perf_counter() - bounded_started
+            except ValueError as error:
+                skipped += 1
+                if audit_mode:
+                    audit_outcomes[audit_stratum]["bounded_failed"] += 1
+                    metrics = bounded_failure_metrics(oracle, top_k)
+                    audit_metrics[top_k].setdefault(audit_stratum, {})
+                    for name, value in metrics.items():
+                        audit_metrics[top_k][audit_stratum].setdefault(name, []).append(value)
+                if args.verbose:
+                    print(f"context={context_id} bounded search failed: {error}")
+                break
+            context_metrics[top_k] = show_context(
+                context_id,
+                oracle,
+                ranked_plans(bounded_table),
+                top_k,
+                oracle_report["states_pushed"],
+                context_steps,
+                int(context_initial.item(0, "initial_zone")),
+                od_costs,
+                destination_inputs,
+                args.proposal_limit_per_source,
+                args.stitch_bias,
+                args.verbose or args.trace_context is not None,
+            )
+        if len(context_metrics) != len(top_ks):
+            continue
+        for top_k, metrics in context_metrics.items():
+            for name, values in metrics_by_top_k[top_k].items():
+                values.append(metrics[name])
+            append_stratum_metrics(layer_metrics, f"layers={layers}", top_k, metrics)
+            append_stratum_metrics(
+                archetype_metrics,
+                f"depth={layers}, anchors={anchor_count}, anchor-types={anchor_activity_types}",
+                top_k,
+                metrics,
+            )
+            if audit_mode:
+                audit_metrics[top_k].setdefault(audit_stratum, {})
+                for name, value in metrics.items():
+                    audit_metrics[top_k][audit_stratum].setdefault(name, []).append(value)
         proven += 1
-        if proven == args.contexts:
+        if audit_mode:
+            audit_outcomes[audit_stratum]["proven"] += 1
+        if not audit_mode and proven == args.contexts:
             break
+    if audit_mode:
+        print_audit_coverage(population_by_stratum, audit_outcomes)
     if not proven:
+        if audit_mode:
+            print("No sampled context completed the exact top-K oracle.")
+            return
         raise RuntimeError("no context completed the exact top-K oracle")
     print(
-        f"\nproven-contexts={proven} skipped={skipped} "
-        f"mean-recall@{args.top_k}={sum(recalls) / proven:.4f} "
-        f"wall={time.perf_counter() - started:.3f}s"
+        f"\nseed={exploration_seed} proven-contexts={proven} skipped={skipped} "
+        f"wall={time.perf_counter() - started:.3f}s "
+        f"exact={exact_search_seconds / proven * 1e3:.2f}ms/context"
     )
-    print(
-        f"search-only exact={exact_search_seconds:.3f}s "
-        f"({exact_search_seconds / proven * 1e3:.2f}ms/context) "
-        f"bounded={bounded_search_seconds:.3f}s "
-        f"({bounded_search_seconds / proven * 1e3:.2f}ms/context) "
-        f"speedup={exact_search_seconds / bounded_search_seconds:.1f}x"
+    print("Search performance and miss diagnosis")
+    print("  K | recall | bounded ms | speedup | missed base/beam")
+    for top_k in top_ks:
+        metrics = metrics_by_top_k[top_k]
+        mean = lambda values: sum(values) / proven
+        bounded_ms = bounded_search_seconds[top_k] / proven * 1e3
+        print(
+            f"{top_k:3d} | {mean(metrics['recall']):.3f}  | {bounded_ms:.2f}       "
+            f"| {exact_search_seconds / bounded_search_seconds[top_k]:.1f}x   "
+            f"| {mean(metrics['missed_base_pool_mass']):.3f}/{mean(metrics['missed_beam_mass']):.3f}"
+        )
+    print_distribution_table(
+        "Retained exact top-K mass (conditional)",
+        {top_k: metrics_by_top_k[top_k]["retained_top_k_mass"] for top_k in top_ks},
     )
-    print_distribution(
-        f"retained exact top-{args.top_k} probability mass (conditional)",
-        retained_top_k_masses,
+    print_distribution_table(
+        f"Retained mass over fixed exact top-{args.oracle_depth} support",
+        {top_k: metrics_by_top_k[top_k]["retained_oracle_mass"] for top_k in top_ks},
     )
-    print_distribution(
-        f"retained exact top-{args.oracle_depth} probability mass (conditional)",
-        retained_oracle_masses,
+    print_distribution_table(
+        f"Exact top-K share of top-{args.oracle_depth} mass",
+        {top_k: metrics_by_top_k[top_k]["top_k_oracle_mass"] for top_k in top_ks},
     )
-    print_distribution(
-        f"exact top-{args.top_k} share of top-{args.oracle_depth} probability mass",
-        top_k_oracle_masses,
+    print_distribution_table(
+        "Top-K mass efficiency",
+        {top_k: metrics_by_top_k[top_k]["top_k_mass_efficiency"] for top_k in top_ks},
     )
-    print_distribution(
-        f"top-{args.top_k} mass efficiency (1 = exact top-{args.top_k} support)",
-        top_k_mass_efficiencies,
+    print_stratum_table("By layer count", layer_metrics, top_ks, limit=len(layer_metrics[top_ks[0]]))
+    print_stratum_table("By plan archetype", archetype_metrics, top_ks, args.archetype_strata_limit)
+    if audit_mode:
+        print_global_audit_estimate(population_by_stratum, audit_outcomes, audit_metrics)
+
+
+def main() -> None:
+    args = parse_args()
+    top_ks = list(dict.fromkeys(args.top_ks or [10]))
+    if min(top_ks) <= 0 or args.oracle_depth < max(top_ks):
+        raise ValueError("--top-k must be positive and --oracle-depth must cover every K")
+    if args.frontier_width < max(top_ks):
+        raise ValueError("--frontier-width must cover every requested K")
+    if args.archetype_strata_limit <= 0:
+        raise ValueError("--archetype-strata-limit must be positive")
+    files = resolve_snapshot_files(args.group_day_trips_folder)
+    print("Preparing cached Grand Geneve inputs (read-only)...")
+    od_costs = prepare_od_costs(files["transport_costs"], files["demand_groups"])
+    destination_inputs = prepare_destination_inputs(
+        files["destination_saturation"], files["demand_groups"]
     )
-    print(
-        f"missed exact top-{args.top_k} mass by cause (per-context mean): "
-        f"not-in-base-pool={sum(missed_base_pool_masses) / proven:.4f} "
-        f"base-supported-but-beam-lost={sum(missed_beam_masses) / proven:.4f}"
+    steps, initial_locations, _ = prepare_complete_contexts(
+        activity_sequences_path=files["activity_sequences"],
+        survey_plan_steps_path=files["survey_plan_steps"],
+        demand_groups_path=files["demand_groups"],
+        activity_dur_path=files["activity_dur"],
     )
+    search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
+    profiles = context_profiles(steps)
+    supported = profiles.filter(pl.col("layers") >= 2)
+    short = supported.filter(pl.col("layers") <= args.max_layers)
+    print("Coverage (Grand Geneve terminal home is an input invariant)")
+    print("stage | contexts")
+    print(f"all | {profiles.height}")
+    print(f"top-k supported (depth>=2) | {supported.height}")
+    if args.contexts_per_stratum is None:
+        print(f"comparison depth=3..{args.max_layers} | {short.height}")
+    else:
+        print(f"audit strata | {supported['audit_stratum'].n_unique()}")
+    profile_by_context = {
+        int(context_id): (
+            int(layers),
+            int(anchor_count),
+            int(anchor_activity_types),
+            str(audit_stratum),
+        )
+        for context_id, layers, anchor_count, anchor_activity_types, audit_stratum in profiles.select(
+            "context_id", "layers", "anchor_count", "anchor_activity_types", "audit_stratum"
+        ).iter_rows()
+    }
+    population_by_stratum = {
+        stratum: int(population)
+        for stratum, population in supported.group_by("audit_stratum").len().iter_rows()
+    }
+    for exploration_seed in args.exploration_seeds or [42]:
+        compare_seed(
+            args,
+            top_ks,
+            exploration_seed,
+            search,
+            steps,
+            initial_locations,
+            od_costs,
+            destination_inputs,
+            profiles,
+            profile_by_context,
+            population_by_stratum,
+        )
 
 
 if __name__ == "__main__":

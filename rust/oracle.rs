@@ -397,6 +397,85 @@ fn append_ranked_plans(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_two_step_plans(
+    output: &mut OutputTable,
+    report: &mut HeapSearchReport,
+    graph: &OdGraph,
+    destinations: &DestinationIndex,
+    context: &Context,
+    problem: &OracleProblem<'_>,
+    parameters: Parameters,
+    k: usize,
+) -> Result<bool, SamplerError> {
+    let terminal_zone = context.steps[1].fixed_destination.ok_or_else(|| {
+        SamplerError::InvalidInput(format!(
+            "context {} needs a fixed terminal destination for exact top-K search",
+            context.context_id
+        ))
+    })?;
+    let terminal = *graph.zone_index.get(&terminal_zone).ok_or_else(|| {
+        SamplerError::InvalidInput(format!(
+            "context {} terminal destination {} is absent from the OD graph",
+            context.context_id, terminal_zone
+        ))
+    })?;
+    let first = context.steps[0];
+    let candidates = if let Some(fixed) = first.fixed_destination {
+        vec![*graph.zone_index.get(&fixed).ok_or_else(|| {
+            SamplerError::InvalidInput(format!(
+                "context {} fixed destination {} is absent from the OD graph",
+                context.context_id, fixed
+            ))
+        })?]
+    } else {
+        destinations
+            .domain(first.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: context.context_id,
+                origin: context.initial_zone,
+            })?
+            .to_vec()
+    };
+    let mut plans = Vec::with_capacity(candidates.len());
+    for destination in candidates {
+        report.children_considered += 1;
+        let zones = vec![destination, terminal];
+        if let Some((score, _)) = score_zones(
+            ScoringInputs {
+                graph,
+                destinations,
+                context,
+                problem: &problem.scoring,
+                parameters,
+            },
+            &zones,
+        ) {
+            plans.push((score, zones));
+        }
+    }
+    if plans.is_empty() {
+        return Ok(false);
+    }
+    report.complete_plans += plans.len() as u64;
+    plans.sort_unstable_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    append_ranked_plans(
+        output,
+        graph,
+        destinations,
+        context,
+        problem,
+        plans.into_iter().take(k).map(|(_, zones)| zones).collect(),
+        parameters,
+    )?;
+    Ok(true)
+}
+
 fn materialize_child(
     context: &Context,
     parent: &HeapState,
@@ -884,11 +963,13 @@ fn pending_children_for_state(
         }
         if layer > 0 {
             let previous_duration = if parameters.update_plan_timings {
-                (adjusted_departure - state.adjusted_arrival.unwrap())
-                    .max(MIN_ACTIVITY_DURATION_HOURS)
+                adjusted_departure - state.adjusted_arrival.unwrap()
             } else {
                 context.steps[layer - 1].duration_per_person
             };
+            if parameters.update_plan_timings && previous_duration <= 0.0 {
+                continue;
+            }
             child.score += parameters.logit_scale
                 * exact_activity_utility(
                     destinations,
@@ -908,8 +989,10 @@ fn pending_children_for_state(
         child.score += attraction - parameters.logit_scale * edge.cost;
 
         if layer + 1 == context.steps.len() {
-            let duration = if parameters.update_plan_timings {
-                (step.next_departure_time - adjusted_arrival).max(MIN_ACTIVITY_DURATION_HOURS)
+            let duration = if step.fixed_destination.is_some() {
+                MIN_ACTIVITY_DURATION_HOURS
+            } else if parameters.update_plan_timings {
+                continue;
             } else {
                 step.duration_per_person
             };
@@ -1026,6 +1109,28 @@ fn search_reference_top_k_sequential(
             count.saturating_mul(domain.len() as u128)
         });
         report.assignment_lattice = report.assignment_lattice.saturating_add(lattice);
+
+        if context.steps.len() == 2 {
+            if append_two_step_plans(
+                &mut output,
+                &mut report,
+                graph,
+                destinations,
+                context,
+                &problem,
+                parameters,
+                k,
+            )? {
+                continue;
+            }
+            if parameters.skip_infeasible {
+                continue;
+            }
+            return Err(SamplerError::NoFeasibleSequence {
+                context_id: context.context_id,
+                origin: context.initial_zone,
+            });
+        }
 
         if !problem.has_cross_home_anchor {
             if let Some(independent_ranges) = independent_home_ranges(context, &ranges) {

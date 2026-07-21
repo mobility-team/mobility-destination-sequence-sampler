@@ -7,7 +7,7 @@ use crate::model::{DestinationIndex, OdGraph};
 use crate::oracle::{search_reference_top_k, HeapSearchReport};
 use crate::output::to_polars_dataframe;
 use crate::scoring::Parameters;
-use crate::top_k::{search_top_k_all, TopKOptions, TopKReport};
+use crate::top_k::{search_top_k_all, CandidateStrategy, TopKOptions, TopKReport};
 
 /// Active deterministic destination-plan search.
 ///
@@ -38,7 +38,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=32, proposal_limit_per_source=16, stitch_bias=0, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=32, proposal_limit_per_source=16, candidate_strategy="heuristic", local_projection_limit=256, stitch_bias=0, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -51,6 +51,8 @@ impl DestinationPlanSearch {
         exploration_seed: u64,
         frontier_width: usize,
         proposal_limit_per_source: usize,
+        candidate_strategy: &str,
+        local_projection_limit: usize,
         stitch_bias: i32,
         continuation_state_limit: usize,
         continuation_proposal_limit: usize,
@@ -64,15 +66,17 @@ impl DestinationPlanSearch {
         validate_top_k(top_k as usize)?;
         if frontier_width == 0
             || proposal_limit_per_source == 0
+            || local_projection_limit == 0
             || continuation_state_limit == 0
             || continuation_proposal_limit == 0
         {
             return Err(SamplerError::InvalidInput(
-                "frontier_width, proposal_limit_per_source, continuation_state_limit, and continuation_proposal_limit must be positive".to_string(),
+                "frontier_width, proposal_limit_per_source, local_projection_limit, continuation_state_limit, and continuation_proposal_limit must be positive".to_string(),
             )
             .into());
         }
         let contexts = parse_reference_contexts(steps, initial_locations)?;
+        let candidate_strategy = CandidateStrategy::parse(candidate_strategy)?;
         let parameters = Parameters {
             logit_scale,
             update_plan_timings,
@@ -90,6 +94,8 @@ impl DestinationPlanSearch {
                     result_limit: top_k,
                     frontier_width,
                     proposal_limit_per_source,
+                    candidate_strategy,
+                    local_projection_limit,
                     stitch_bias,
                     continuation_state_limit,
                     continuation_proposal_limit,
@@ -172,6 +178,10 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
         "backward_proposals_evaluated",
         report.backward_candidate_evaluations,
     )?;
+    result.set_item(
+        "exact_local_proposals_evaluated",
+        report.exact_local_proposal_evaluations,
+    )?;
     result.set_item("continuation_proposals", report.continuation_proposals)?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
@@ -183,6 +193,7 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("backward_guidance_ns", report.backward_guidance_ns)?;
     result.set_item("forward_search_ns", report.forward_search_ns)?;
     result.set_item("continuation_guidance_ns", report.continuation_guidance_ns)?;
+    result.set_item("exact_local_proposal_ns", report.exact_local_proposal_ns)?;
     result.set_item("seam_refresh_ns", report.seam_refresh_ns)?;
     result.set_item("stitch_ns", report.stitch_ns)?;
     result.set_item("materialize_ns", report.materialize_ns)?;

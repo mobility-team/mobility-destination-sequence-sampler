@@ -436,6 +436,17 @@ def prepare_complete_contexts(
         .unique()
         .sort("context_id")
     )
+    invalid_terminal = (
+        unique_steps.filter(pl.col("layer") == pl.col("layer").max().over("context_id"))
+        .join(initial_locations, on="context_id")
+        .filter(
+            (pl.col("activity_id") != ACTIVITY_IDS["home"])
+            | pl.col("fixed_destination").is_null()
+            | (pl.col("fixed_destination") != pl.col("initial_zone"))
+        )
+    )
+    if invalid_terminal.height:
+        raise ValueError("Grand Geneve contexts must end at their fixed home zone")
     return unique_steps, initial_locations, raw_context_count
 
 

@@ -12,6 +12,9 @@ Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 - `just test` — Python tests (after a build).
 - `just check` — format, Clippy, then tests.
 - `just compare-quality` — 50-context bounded-versus-exact default comparison.
+- `just compare-k-sweep [seed]` — K=10/20/50/100 against a fixed top-500 oracle support.
+- `just compare-k-sweep-seeds` — repeat that sweep for validation seeds 42–46.
+- `just audit-global-quality [per_stratum] [max_states]` — all-depth weighted oracle-audit pilot; failures remain visible.
 - `just compare-refresh` — 0/1/2/4 refresh quality trade-off.
 - `just benchmark-throughput` — 1,000-context eight-thread runtime profile.
 

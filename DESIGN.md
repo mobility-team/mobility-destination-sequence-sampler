@@ -5,8 +5,10 @@
 Python supplies prepared Polars tables; Rust owns indexes, feasibility,
 scoring, and hot loops. Reuse one `DestinationPlanSearch` per OD/destination
 iteration. The public methods are `top_k()` (bounded) and `exact_top_k()`
-(proof oracle). `top_k()` needs at least three steps and a fixed final
-destination; that destination need not equal `initial_zone`.
+(proof oracle). `top_k()` needs at least two steps and a fixed final
+destination; two-step contexts use an exact direct scan, while longer contexts
+use the bounded bidirectional search. That destination need not equal
+`initial_zone`.
 
 ```text
 OD:          origin, destination, cost, time

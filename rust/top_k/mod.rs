@@ -23,8 +23,31 @@ use crate::scoring::{
 mod candidates;
 
 use candidates::{
-    candidates, reverse_projection_candidates, CandidateCache, CandidateInputs, CandidateQuery,
+    candidates, exact_local_candidates, exact_local_candidates_from,
+    exact_reverse_local_candidates, reverse_projection_candidates, CandidateCache, CandidateInputs,
+    CandidateQuery,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CandidateStrategy {
+    Heuristic,
+    ExactLocal,
+    ProjectedLocal,
+}
+
+impl CandidateStrategy {
+    pub(crate) fn parse(value: &str) -> Result<Self, SamplerError> {
+        match value {
+            "heuristic" => Ok(Self::Heuristic),
+            "exact_local" => Ok(Self::ExactLocal),
+            "projected_local" => Ok(Self::ProjectedLocal),
+            _ => Err(SamplerError::InvalidInput(
+                "candidate_strategy must be 'heuristic', 'exact_local', or 'projected_local'"
+                    .to_string(),
+            )),
+        }
+    }
+}
 
 struct PrefixNode {
     parent: Option<usize>,
@@ -109,6 +132,7 @@ pub struct TopKReport {
     pub contexts: u64,
     pub forward_candidate_evaluations: u64,
     pub backward_candidate_evaluations: u64,
+    pub exact_local_proposal_evaluations: u64,
     pub continuation_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
@@ -120,6 +144,7 @@ pub struct TopKReport {
     pub backward_guidance_ns: u64,
     pub forward_search_ns: u64,
     pub continuation_guidance_ns: u64,
+    pub exact_local_proposal_ns: u64,
     pub seam_refresh_ns: u64,
     pub stitch_ns: u64,
     pub materialize_ns: u64,
@@ -132,6 +157,8 @@ pub struct TopKOptions {
     pub result_limit: u32,
     pub frontier_width: usize,
     pub proposal_limit_per_source: usize,
+    pub candidate_strategy: CandidateStrategy,
+    pub local_projection_limit: usize,
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
     pub continuation_proposal_limit: usize,
@@ -192,6 +219,7 @@ impl TopKReport {
         self.contexts += other.contexts;
         self.forward_candidate_evaluations += other.forward_candidate_evaluations;
         self.backward_candidate_evaluations += other.backward_candidate_evaluations;
+        self.exact_local_proposal_evaluations += other.exact_local_proposal_evaluations;
         self.continuation_proposals += other.continuation_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
@@ -203,6 +231,7 @@ impl TopKReport {
         self.backward_guidance_ns += other.backward_guidance_ns;
         self.forward_search_ns += other.forward_search_ns;
         self.continuation_guidance_ns += other.continuation_guidance_ns;
+        self.exact_local_proposal_ns += other.exact_local_proposal_ns;
         self.seam_refresh_ns += other.seam_refresh_ns;
         self.stitch_ns += other.stitch_ns;
         self.materialize_ns += other.materialize_ns;
@@ -354,6 +383,7 @@ fn forward_beam(
         graph,
         destinations,
         context,
+        scoring: inputs.scoring(),
         candidate_count,
         exploration_seed: inputs.options.exploration_seed,
     };
@@ -375,18 +405,62 @@ fn forward_beam(
             let candidate_slot = context.steps[layer]
                 .anchor_id
                 .and_then(|anchor| anchor_slots.get(&anchor).copied());
-            let mut candidate_zones = candidates(
-                candidate_inputs,
-                CandidateQuery {
-                    layer,
-                    reference_zone: parent.zone,
-                    reverse: false,
-                    state_index,
-                    anchor_slot: candidate_slot,
-                    anchors: &parent.anchors,
-                },
-                candidate_cache,
-            )?;
+            let query = CandidateQuery {
+                layer,
+                reference_zone: parent.zone,
+                reverse: false,
+                state_index,
+                anchor_slot: candidate_slot,
+                anchors: &parent.anchors,
+            };
+            let exact_local_next = backward
+                .guidance_frontiers
+                .get(layer + 1)
+                .and_then(|frontier| frontier.first())
+                .map(|&index| backward.nodes[index].zone);
+            let unassigned = candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none());
+            let mut candidate_zones = match (inputs.options.candidate_strategy, exact_local_next) {
+                (CandidateStrategy::ExactLocal, Some(next_zone)) if unassigned => {
+                    let exact_local_started = profile.then(Instant::now);
+                    if context.steps[layer].fixed_destination.is_none() {
+                        report.exact_local_proposal_evaluations += destinations
+                            .domain(context.steps[layer].activity_id)
+                            .map_or(0, |domain| domain.len() as u64);
+                    }
+                    let result = exact_local_candidates(candidate_inputs, query, next_zone)?;
+                    if let Some(started) = exact_local_started {
+                        report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
+                    }
+                    result
+                }
+                (CandidateStrategy::ProjectedLocal, Some(next_zone)) if unassigned => {
+                    let exact_local_started = profile.then(Instant::now);
+                    let mut projected = candidates(candidate_inputs, query, candidate_cache)?;
+                    projected.extend(reverse_projection_candidates(
+                        graph,
+                        destinations,
+                        context,
+                        layer,
+                        next_zone,
+                        inputs.options.local_projection_limit,
+                        candidate_cache,
+                    )?);
+                    projected.sort_unstable();
+                    projected.dedup();
+                    report.exact_local_proposal_evaluations += projected.len() as u64;
+                    let result = exact_local_candidates_from(
+                        candidate_inputs,
+                        query,
+                        next_zone,
+                        &projected,
+                    )?;
+                    if let Some(started) = exact_local_started {
+                        report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
+                    }
+                    result
+                }
+                _ => candidates(candidate_inputs, query, candidate_cache)?,
+            };
             let proposal_guidance_started = profile.then(Instant::now);
             if candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none()) {
                 if let Some(suffix_frontier) = backward.guidance_frontiers.get(layer + 1) {
@@ -598,6 +672,7 @@ fn refresh_stitch_frontier(
         graph,
         destinations,
         context,
+        scoring: inputs.scoring(),
         candidate_count,
         exploration_seed: inputs.options.exploration_seed,
     };
@@ -741,6 +816,7 @@ fn backward_beam(
         graph,
         destinations,
         context,
+        scoring: inputs.scoring(),
         candidate_count,
         exploration_seed: inputs.options.exploration_seed,
     };
@@ -769,27 +845,46 @@ fn backward_beam(
         for (state_index, &next_index) in frontier.iter().enumerate() {
             let next = &nodes[next_index];
             let next_zone = next.zone;
-            for candidate in candidates(
-                candidate_inputs,
-                CandidateQuery {
-                    layer,
-                    reference_zone: next_zone,
-                    reverse: true,
-                    state_index,
-                    anchor_slot: context.steps[layer]
-                        .anchor_id
-                        .and_then(|anchor| anchor_slots.get(&anchor).copied()),
-                    anchors: &next.anchors,
-                },
-                candidate_cache,
-            )? {
+            let query = CandidateQuery {
+                layer,
+                reference_zone: next_zone,
+                reverse: true,
+                state_index,
+                anchor_slot: context.steps[layer]
+                    .anchor_id
+                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
+                anchors: &next.anchors,
+            };
+            let next_next_zone = next.next.map(|index| nodes[index].zone);
+            let reverse_candidates =
+                if inputs.options.candidate_strategy == CandidateStrategy::ExactLocal {
+                    let exact_local_started = profile.then(Instant::now);
+                    if context.steps[layer].fixed_destination.is_none() {
+                        report.exact_local_proposal_evaluations += destinations
+                            .domain(context.steps[layer].activity_id)
+                            .map_or(0, |domain| domain.len() as u64);
+                    }
+                    let result = exact_reverse_local_candidates(
+                        candidate_inputs,
+                        query,
+                        next_zone,
+                        next_next_zone,
+                    )?;
+                    if let Some(started) = exact_local_started {
+                        report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
+                    }
+                    result
+                } else {
+                    candidates(candidate_inputs, query, candidate_cache)?
+                };
+            for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
                     inputs.scoring(),
                     layer + 1,
                     candidate,
                     next_zone,
-                    next.next.map(|index| nodes[index].zone),
+                    next_next_zone,
                 );
                 if let Some(score) = score {
                     children.push((next_index, candidate, score));
@@ -865,6 +960,7 @@ fn extend_backward_guidance(
         graph,
         destinations,
         context,
+        scoring: inputs.scoring(),
         candidate_count,
         exploration_seed: inputs.options.exploration_seed,
     };
@@ -882,27 +978,46 @@ fn extend_backward_guidance(
         for (state_index, &next_index) in frontier.iter().enumerate() {
             let next = &messages.nodes[next_index];
             let next_zone = next.zone;
-            for candidate in candidates(
-                candidate_inputs,
-                CandidateQuery {
-                    layer,
-                    reference_zone: next_zone,
-                    reverse: true,
-                    state_index,
-                    anchor_slot: context.steps[layer]
-                        .anchor_id
-                        .and_then(|anchor| anchor_slots.get(&anchor).copied()),
-                    anchors: &next.anchors,
-                },
-                candidate_cache,
-            )? {
+            let query = CandidateQuery {
+                layer,
+                reference_zone: next_zone,
+                reverse: true,
+                state_index,
+                anchor_slot: context.steps[layer]
+                    .anchor_id
+                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
+                anchors: &next.anchors,
+            };
+            let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
+            let reverse_candidates =
+                if inputs.options.candidate_strategy == CandidateStrategy::ExactLocal {
+                    let exact_local_started = profile.then(Instant::now);
+                    if context.steps[layer].fixed_destination.is_none() {
+                        report.exact_local_proposal_evaluations += destinations
+                            .domain(context.steps[layer].activity_id)
+                            .map_or(0, |domain| domain.len() as u64);
+                    }
+                    let result = exact_reverse_local_candidates(
+                        candidate_inputs,
+                        query,
+                        next_zone,
+                        next_next_zone,
+                    )?;
+                    if let Some(started) = exact_local_started {
+                        report.exact_local_proposal_ns += started.elapsed().as_nanos() as u64;
+                    }
+                    result
+                } else {
+                    candidates(candidate_inputs, query, candidate_cache)?
+                };
+            for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
                     inputs.scoring(),
                     layer + 1,
                     candidate,
                     next_zone,
-                    next.next.map(|index| messages.nodes[index].zone),
+                    next_next_zone,
                 );
                 if let Some(score) = score {
                     children.push((next_index, candidate, score));
@@ -1006,6 +1121,82 @@ fn append_plan(output: &mut OutputTable, inputs: &SearchInputs<'_>, zones: &[usi
     }
 }
 
+fn search_two_step_context(
+    inputs: &SearchInputs<'_>,
+    scratch: &mut SearchScratch,
+) -> Result<OutputTable, SamplerError> {
+    let search_started = inputs.options.profile.then(Instant::now);
+    let terminal = inputs.context.steps[1];
+    let terminal_zone = terminal.fixed_destination.ok_or_else(|| {
+        SamplerError::InvalidInput(format!(
+            "context {} needs a fixed terminal destination for top-K search",
+            inputs.context.context_id
+        ))
+    })?;
+    let terminal = *inputs.graph.zone_index.get(&terminal_zone).ok_or_else(|| {
+        SamplerError::InvalidInput(format!(
+            "context {} terminal destination {} is absent from the OD graph",
+            inputs.context.context_id, terminal_zone
+        ))
+    })?;
+    let first = inputs.context.steps[0];
+    let candidates = if let Some(fixed) = first.fixed_destination {
+        vec![*inputs.graph.zone_index.get(&fixed).ok_or_else(|| {
+            SamplerError::InvalidInput(format!(
+                "context {} fixed destination {} is absent from the OD graph",
+                inputs.context.context_id, fixed
+            ))
+        })?]
+    } else {
+        inputs
+            .destinations
+            .domain(first.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: inputs.context.context_id,
+                origin: inputs.context.initial_zone,
+            })?
+            .to_vec()
+    };
+    let mut completed = Vec::with_capacity(candidates.len());
+    for destination in candidates {
+        scratch.report.forward_candidate_evaluations += 1;
+        let zones = vec![destination, terminal];
+        if let Some((score, _)) = score_zones(inputs.scoring(), &zones) {
+            completed.push((score, zones));
+        }
+    }
+    if let Some(started) = search_started {
+        scratch.report.forward_search_ns += started.elapsed().as_nanos() as u64;
+    }
+    if completed.is_empty() {
+        scratch.report.infeasible_contexts = 1;
+        return Err(SamplerError::NoFeasibleSequence {
+            context_id: inputs.context.context_id,
+            origin: inputs.context.initial_zone,
+        });
+    }
+    completed.sort_unstable_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    scratch.report.completed_plans = completed.len() as u64;
+    let materialize_started = inputs.options.profile.then(Instant::now);
+    let mut output = OutputTable::default();
+    for (draw, (_, zones)) in completed
+        .into_iter()
+        .take(inputs.options.result_limit as usize)
+        .enumerate()
+    {
+        append_plan(&mut output, inputs, &zones, draw as u32 + 1);
+    }
+    if let Some(started) = materialize_started {
+        scratch.report.materialize_ns += started.elapsed().as_nanos() as u64;
+    }
+    Ok(output)
+}
+
 fn search_context(
     graph: &OdGraph,
     destinations: &DestinationIndex,
@@ -1014,9 +1205,9 @@ fn search_context(
     options: TopKOptions,
 ) -> Result<(OutputTable, TopKReport), SamplerError> {
     let started = options.profile.then(Instant::now);
-    if context.steps.len() < 3 {
+    if context.steps.len() < 2 {
         return Err(SamplerError::InvalidInput(format!(
-            "context {} needs at least three steps for bidirectional top-K search",
+            "context {} needs at least two steps for top-K search",
             context.context_id
         )));
     }
@@ -1034,6 +1225,13 @@ fn search_context(
     let mut scratch = SearchScratch::new();
     if let Some(started) = build_started {
         scratch.report.build_problem_ns += started.elapsed().as_nanos() as u64;
+    }
+    if inputs.context.steps.len() == 2 {
+        let output = search_two_step_context(&inputs, &mut scratch)?;
+        if let Some(started) = started {
+            scratch.report.total_search_ns += started.elapsed().as_nanos() as u64;
+        }
+        return Ok((output, scratch.report));
     }
     let balanced_stitch_layer = (inputs.context.steps.len() - 1) as i32 / 2;
     let stitch_layer = (balanced_stitch_layer + inputs.options.stitch_bias)
