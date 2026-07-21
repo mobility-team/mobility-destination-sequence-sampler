@@ -38,7 +38,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, candidate_strategy="factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, ping_pong_bootstrap_width=0, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, candidate_strategy="factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -58,7 +58,6 @@ impl DestinationPlanSearch {
         continuation_state_limit: usize,
         continuation_proposal_limit: usize,
         seam_refresh_per_prefix: usize,
-        ping_pong_bootstrap_width: usize,
         top_k: u32,
         n_threads: Option<usize>,
         skip_infeasible: bool,
@@ -113,7 +112,6 @@ impl DestinationPlanSearch {
                     continuation_state_limit,
                     continuation_proposal_limit,
                     seam_refresh_per_prefix,
-                    ping_pong_bootstrap_width,
                     profile: collect_profile,
                 },
                 n_threads,
@@ -203,15 +201,6 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("continuation_proposals", report.continuation_proposals)?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
-    result.set_item(
-        "ping_pong_bootstrap_evaluations",
-        report.ping_pong_bootstrap_evaluations,
-    )?;
-    result.set_item(
-        "ping_pong_bridge_proposals",
-        report.ping_pong_bridge_proposals,
-    )?;
-    result.set_item("ping_pong_bridge_plans", report.ping_pong_bridge_plans)?;
     result.set_item("stitch_pairs", report.stitch_pairs)?;
     result.set_item("complete_plan_candidates", report.completed_plans)?;
     result.set_item("infeasible_contexts", report.infeasible_contexts)?;
@@ -223,7 +212,6 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("surface_proposal_ns", report.surface_proposal_ns)?;
     result.set_item("factor_map_ns", report.factor_map_ns)?;
     result.set_item("seam_refresh_ns", report.seam_refresh_ns)?;
-    result.set_item("ping_pong_ns", report.ping_pong_ns)?;
     result.set_item("stitch_ns", report.stitch_ns)?;
     result.set_item("materialize_ns", report.materialize_ns)?;
     result.set_item("total_search_ns", report.total_search_ns)?;
