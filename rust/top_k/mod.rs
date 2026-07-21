@@ -23,8 +23,8 @@ use crate::scoring::{
 mod candidates;
 
 use candidates::{
-    candidates, reverse_projection_candidates, surface_candidates, CandidateCache, CandidateInputs,
-    CandidateQuery,
+    candidates, component_candidates, reverse_projection_candidates, surface_candidates,
+    CandidateCache, CandidateInputs, CandidateQuery,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +32,8 @@ pub(crate) enum CandidateStrategy {
     Heuristic,
     Surface,
     FactorMap,
+    PartialMap,
+    HybridMap,
 }
 
 impl CandidateStrategy {
@@ -40,8 +42,11 @@ impl CandidateStrategy {
             "heuristic" => Ok(Self::Heuristic),
             "surface" => Ok(Self::Surface),
             "factor_map" => Ok(Self::FactorMap),
+            "partial_map" => Ok(Self::PartialMap),
+            "hybrid_map" => Ok(Self::HybridMap),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'surface', 'factor_map', or 'heuristic'".to_string(),
+                "candidate_strategy must be 'surface', 'factor_map', 'partial_map', 'hybrid_map', or 'heuristic'"
+                    .to_string(),
             )),
         }
     }
@@ -139,6 +144,7 @@ pub struct TopKReport {
     pub backward_candidate_evaluations: u64,
     pub surface_proposal_evaluations: u64,
     pub factor_map_destination_evaluations: u64,
+    pub partial_map_destination_evaluations: u64,
     pub continuation_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
@@ -152,6 +158,7 @@ pub struct TopKReport {
     pub continuation_guidance_ns: u64,
     pub surface_proposal_ns: u64,
     pub factor_map_ns: u64,
+    pub partial_map_ns: u64,
     pub seam_refresh_ns: u64,
     pub stitch_ns: u64,
     pub materialize_ns: u64,
@@ -231,6 +238,7 @@ impl TopKReport {
         self.backward_candidate_evaluations += other.backward_candidate_evaluations;
         self.surface_proposal_evaluations += other.surface_proposal_evaluations;
         self.factor_map_destination_evaluations += other.factor_map_destination_evaluations;
+        self.partial_map_destination_evaluations += other.partial_map_destination_evaluations;
         self.continuation_proposals += other.continuation_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
@@ -244,6 +252,7 @@ impl TopKReport {
         self.continuation_guidance_ns += other.continuation_guidance_ns;
         self.surface_proposal_ns += other.surface_proposal_ns;
         self.factor_map_ns += other.factor_map_ns;
+        self.partial_map_ns += other.partial_map_ns;
         self.seam_refresh_ns += other.seam_refresh_ns;
         self.stitch_ns += other.stitch_ns;
         self.materialize_ns += other.materialize_ns;
@@ -484,6 +493,56 @@ fn factor_map_candidates(
     Ok(result)
 }
 
+/// Combine independent deterministic local components with the adjacent factor
+/// whose three destinations are already known.  A missing score removes a
+/// destination only from that complete factor map; the activity and known-leg
+/// components remain available while the other leg is still unknown.
+fn partial_map_candidates(
+    inputs: &SearchInputs<'_>,
+    candidate_inputs: CandidateInputs<'_>,
+    query: CandidateQuery<'_>,
+    cache: &mut CandidateCache,
+    mut completed_factor: impl FnMut(usize) -> Option<f64>,
+) -> Result<Vec<usize>, SamplerError> {
+    let step = inputs.context.steps[query.layer];
+    if query
+        .anchor_slot
+        .and_then(|slot| query.anchors[slot])
+        .is_some()
+        || step.fixed_destination.is_some()
+    {
+        return component_candidates(candidate_inputs, query, cache);
+    }
+    let domain =
+        inputs
+            .destinations
+            .domain(step.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: inputs.context.context_id,
+                origin: inputs.context.initial_zone,
+            })?;
+    let compare = |left: &(f64, usize), right: &(f64, usize)| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+    };
+    let mut ranked = domain
+        .iter()
+        .filter_map(|&destination| completed_factor(destination).map(|score| (score, destination)))
+        .collect::<Vec<_>>();
+    let map_limit = inputs.options.proposal_limit_per_source;
+    if ranked.len() > map_limit {
+        ranked.select_nth_unstable_by(map_limit - 1, compare);
+        ranked.truncate(map_limit);
+    }
+    let mut result = component_candidates(candidate_inputs, query, cache)?;
+    result.extend(ranked.into_iter().map(|(_, destination)| destination));
+    result.sort_unstable();
+    result.dedup();
+    Ok(result)
+}
+
 fn forward_beam(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
@@ -572,7 +631,9 @@ fn forward_beam(
                     }
                     result
                 }
-                (CandidateStrategy::FactorMap, Some(_)) if unassigned => {
+                (CandidateStrategy::FactorMap | CandidateStrategy::HybridMap, Some(_))
+                    if unassigned =>
+                {
                     let map_started = profile.then(Instant::now);
                     let factor_suffixes = if backward.frontiers[layer + 1].is_empty() {
                         guidance_suffixes
@@ -610,8 +671,84 @@ fn forward_beam(
                     }
                     result
                 }
+                (CandidateStrategy::PartialMap, _) if unassigned => {
+                    let map_started = profile.then(Instant::now);
+                    if context.steps[layer].fixed_destination.is_none() {
+                        report.partial_map_destination_evaluations += destinations
+                            .domain(context.steps[layer].activity_id)
+                            .map_or(0, |domain| domain.len() as u64);
+                    }
+                    let result = partial_map_candidates(
+                        inputs,
+                        candidate_inputs,
+                        query,
+                        candidate_cache,
+                        |destination| {
+                            if let Some(previous_zone) = previous_zone {
+                                local_scores.score(
+                                    inputs.scoring(),
+                                    layer - 1,
+                                    previous_zone,
+                                    parent.zone,
+                                    Some(destination),
+                                )
+                            } else {
+                                initial_endpoint_score(
+                                    graph,
+                                    destinations,
+                                    context,
+                                    destination,
+                                    parameters,
+                                )
+                            }
+                        },
+                    )?;
+                    if let Some(started) = map_started {
+                        report.partial_map_ns += started.elapsed().as_nanos() as u64;
+                    }
+                    result
+                }
+                (CandidateStrategy::HybridMap, _) if unassigned => {
+                    component_candidates(candidate_inputs, query, candidate_cache)?
+                }
                 _ => candidates(candidate_inputs, query, candidate_cache)?,
             };
+            if inputs.options.candidate_strategy == CandidateStrategy::HybridMap && unassigned {
+                let map_started = profile.then(Instant::now);
+                if context.steps[layer].fixed_destination.is_none() {
+                    report.partial_map_destination_evaluations += destinations
+                        .domain(context.steps[layer].activity_id)
+                        .map_or(0, |domain| domain.len() as u64);
+                }
+                candidate_zones.extend(partial_map_candidates(
+                    inputs,
+                    candidate_inputs,
+                    query,
+                    candidate_cache,
+                    |destination| {
+                        if let Some(previous_zone) = previous_zone {
+                            local_scores.score(
+                                inputs.scoring(),
+                                layer - 1,
+                                previous_zone,
+                                parent.zone,
+                                Some(destination),
+                            )
+                        } else {
+                            initial_endpoint_score(
+                                graph,
+                                destinations,
+                                context,
+                                destination,
+                                parameters,
+                            )
+                        }
+                    },
+                )?);
+                if let Some(started) = map_started {
+                    report.partial_map_ns += started.elapsed().as_nanos() as u64;
+                }
+            }
             let proposal_guidance_started = profile.then(Instant::now);
             if candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none()) {
                 if let Some(suffix_frontier) = backward.guidance_frontiers.get(layer + 1) {
@@ -1004,7 +1141,38 @@ fn backward_beam(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| nodes[index].zone);
-            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
+            let reverse_candidates = if matches!(
+                inputs.options.candidate_strategy,
+                CandidateStrategy::PartialMap | CandidateStrategy::HybridMap
+            ) {
+                let map_started = profile.then(Instant::now);
+                if context.steps[layer].fixed_destination.is_none() {
+                    report.partial_map_destination_evaluations += destinations
+                        .domain(context.steps[layer].activity_id)
+                        .map_or(0, |domain| domain.len() as u64);
+                }
+                let result = partial_map_candidates(
+                    inputs,
+                    candidate_inputs,
+                    query,
+                    candidate_cache,
+                    |candidate| {
+                        local_scores.score(
+                            inputs.scoring(),
+                            layer + 1,
+                            candidate,
+                            next_zone,
+                            next_next_zone,
+                        )
+                    },
+                )?;
+                if let Some(started) = map_started {
+                    report.partial_map_ns += started.elapsed().as_nanos() as u64;
+                }
+                result
+            } else {
+                candidates(candidate_inputs, query, candidate_cache)?
+            };
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -1077,7 +1245,10 @@ fn extend_backward_guidance(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let guidance_width = if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
+    let guidance_width = if matches!(
+        inputs.options.candidate_strategy,
+        CandidateStrategy::FactorMap | CandidateStrategy::PartialMap | CandidateStrategy::HybridMap
+    ) {
         inputs.options.continuation_state_limit.max(4)
     } else {
         inputs.options.continuation_state_limit
@@ -1122,7 +1293,38 @@ fn extend_backward_guidance(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
-            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
+            let reverse_candidates = if matches!(
+                inputs.options.candidate_strategy,
+                CandidateStrategy::PartialMap | CandidateStrategy::HybridMap
+            ) {
+                let map_started = profile.then(Instant::now);
+                if context.steps[layer].fixed_destination.is_none() {
+                    report.partial_map_destination_evaluations += destinations
+                        .domain(context.steps[layer].activity_id)
+                        .map_or(0, |domain| domain.len() as u64);
+                }
+                let result = partial_map_candidates(
+                    inputs,
+                    candidate_inputs,
+                    query,
+                    candidate_cache,
+                    |candidate| {
+                        local_scores.score(
+                            inputs.scoring(),
+                            layer + 1,
+                            candidate,
+                            next_zone,
+                            next_next_zone,
+                        )
+                    },
+                )?;
+                if let Some(started) = map_started {
+                    report.partial_map_ns += started.elapsed().as_nanos() as u64;
+                }
+                result
+            } else {
+                candidates(candidate_inputs, query, candidate_cache)?
+            };
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -1329,6 +1531,8 @@ fn search_context(
     let use_heuristic = match options.candidate_strategy {
         CandidateStrategy::Surface => context.steps.len() > 4,
         CandidateStrategy::FactorMap => context.steps.len() > options.factor_map_max_depth,
+        CandidateStrategy::PartialMap => false,
+        CandidateStrategy::HybridMap => false,
         CandidateStrategy::Heuristic => false,
     };
     let options = if use_heuristic {

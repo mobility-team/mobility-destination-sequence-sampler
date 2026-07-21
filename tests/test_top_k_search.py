@@ -309,7 +309,7 @@ def test_bidirectional_top_k_matches_exact_when_the_beam_covers_the_toy_domain()
         **common,
         exploration_seed=13,
         frontier_width=8,
-        proposal_limit_per_source=2,
+        proposal_limit_per_source=8,
         candidate_strategy="factor_map",
         seam_refresh_per_prefix=0,
     )

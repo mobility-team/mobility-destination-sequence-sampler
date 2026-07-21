@@ -113,6 +113,44 @@ pub(super) fn candidates(
     cache: &mut CandidateCache,
 ) -> Result<Vec<usize>, SamplerError> {
     let step = inputs.context.steps[query.layer];
+    let mut result = component_candidates(inputs, query, cache)?;
+    if step.fixed_destination.is_some() {
+        return Ok(result);
+    }
+    let domain =
+        inputs
+            .destinations
+            .domain(step.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: inputs.context.context_id,
+                origin: inputs.context.initial_zone,
+            })?;
+    for draw in 0..2 {
+        let exploration = domain[exploration_index(
+            inputs.exploration_seed,
+            inputs.context.context_id,
+            query.state_index,
+            query.layer,
+            draw,
+            domain.len(),
+        )];
+        if let Err(index) = result.binary_search(&exploration) {
+            result.insert(index, exploration);
+        }
+    }
+    Ok(result)
+}
+
+/// Deterministic local proposal components: activity opportunity and the
+/// currently known travel leg.  Unlike [`candidates`], this deliberately adds
+/// no random exploration.  Partial-map search combines these independent
+/// components with the one neighbouring factor that is already complete.
+pub(super) fn component_candidates(
+    inputs: CandidateInputs<'_>,
+    query: CandidateQuery<'_>,
+    cache: &mut CandidateCache,
+) -> Result<Vec<usize>, SamplerError> {
+    let step = inputs.context.steps[query.layer];
     if let Some(zone) = query.anchor_slot.and_then(|slot| query.anchors[slot]) {
         return Ok(vec![zone]);
     }
@@ -134,29 +172,7 @@ pub(super) fn candidates(
     if step.fixed_destination.is_some() {
         return Ok(base.clone());
     }
-    let domain =
-        inputs
-            .destinations
-            .domain(step.activity_id)
-            .ok_or(SamplerError::NoFeasibleSequence {
-                context_id: inputs.context.context_id,
-                origin: inputs.context.initial_zone,
-            })?;
-    let mut result = base.clone();
-    for draw in 0..2 {
-        let exploration = domain[exploration_index(
-            inputs.exploration_seed,
-            inputs.context.context_id,
-            query.state_index,
-            query.layer,
-            draw,
-            domain.len(),
-        )];
-        if let Err(index) = result.binary_search(&exploration) {
-            result.insert(index, exploration);
-        }
-    }
-    Ok(result)
+    Ok(base.clone())
 }
 
 /// Diverse candidates from a precomputed utility surface.
