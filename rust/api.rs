@@ -186,6 +186,10 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
         "surface_proposals_evaluated",
         report.surface_proposal_evaluations,
     )?;
+    result.set_item(
+        "factor_map_destinations_evaluated",
+        report.factor_map_destination_evaluations,
+    )?;
     result.set_item("continuation_proposals", report.continuation_proposals)?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
@@ -198,6 +202,7 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("forward_search_ns", report.forward_search_ns)?;
     result.set_item("continuation_guidance_ns", report.continuation_guidance_ns)?;
     result.set_item("surface_proposal_ns", report.surface_proposal_ns)?;
+    result.set_item("factor_map_ns", report.factor_map_ns)?;
     result.set_item("seam_refresh_ns", report.seam_refresh_ns)?;
     result.set_item("stitch_ns", report.stitch_ns)?;
     result.set_item("materialize_ns", report.materialize_ns)?;

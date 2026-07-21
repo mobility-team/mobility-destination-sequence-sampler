@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
     parser.add_argument(
         "--candidate-strategy",
-        choices=("surface", "heuristic"),
+        choices=("surface", "factor_map", "heuristic"),
         default="surface",
         help="bounded proposal policy (default: surface)",
     )

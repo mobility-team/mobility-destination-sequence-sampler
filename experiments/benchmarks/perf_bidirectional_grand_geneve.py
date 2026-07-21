@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
     parser.add_argument(
         "--candidate-strategy",
-        choices=("surface", "heuristic"),
+        choices=("surface", "factor_map", "heuristic"),
         default="surface",
     )
     parser.add_argument("--surface-bins", type=int, choices=(2, 4), default=2)
@@ -182,6 +182,7 @@ def main() -> None:
                     "surface_proposals",
                     bidirectional_report["surface_proposal_ns"],
                 ),
+                ("factor_map", bidirectional_report["factor_map_ns"]),
                 ("seam_refresh", bidirectional_report["seam_refresh_ns"]),
                 ("stitch", bidirectional_report["stitch_ns"]),
                 ("materialize", bidirectional_report["materialize_ns"]),
