@@ -77,6 +77,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
     parser.add_argument("--seam-refresh-per-prefix", type=int, default=1)
+    parser.add_argument(
+        "--ping-pong-bootstrap-width",
+        type=int,
+        default=0,
+        help="independent forward-message width (0 disables the experimental bridge)",
+    )
     parser.add_argument("--archetype-strata-limit", type=int, default=12)
     parser.add_argument(
         "--trace-context",
@@ -722,7 +728,7 @@ def compare_seed(
         for top_k in top_ks:
             try:
                 bounded_started = time.perf_counter()
-                bounded_table, _ = search.top_k(
+                bounded_table, bounded_report = search.top_k(
                     steps=context_steps,
                     initial_locations=context_initial,
                     logit_scale=LOGIT_SCALE,
@@ -738,11 +744,21 @@ def compare_seed(
                     continuation_state_limit=args.continuation_state_limit,
                     continuation_proposal_limit=args.continuation_proposal_limit,
                     seam_refresh_per_prefix=args.seam_refresh_per_prefix,
+                    ping_pong_bootstrap_width=args.ping_pong_bootstrap_width,
                     top_k=top_k,
                     n_threads=1,
                     skip_infeasible=False,
+                    collect_profile=args.trace_context is not None,
                 )
                 bounded_search_seconds[top_k] += time.perf_counter() - bounded_started
+                if args.trace_context is not None:
+                    print(
+                        "ping-pong trace: "
+                        f"bootstrap-evals={bounded_report['ping_pong_bootstrap_evaluations']} "
+                        f"bridge-proposals={bounded_report['ping_pong_bridge_proposals']} "
+                        f"bridge-plans={bounded_report['ping_pong_bridge_plans']} "
+                        f"time={bounded_report['ping_pong_ns'] / 1e6:.3f}ms"
+                    )
             except ValueError as error:
                 skipped += 1
                 if audit_mode:
