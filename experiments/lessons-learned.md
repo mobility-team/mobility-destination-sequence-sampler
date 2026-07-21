@@ -6,6 +6,8 @@
 - Refresh adds useful forward support without replacing the reverse/home
   frontier. Seam lookahead had identical mass and nearly doubled runtime, so
   it was removed.
+- A full-domain, root-diverse forward bridge can repair an isolated repeated-
+  anchor miss, but did not improve the stratified audit and cost 80% more.
 - Exact search must prove or fail at its state budget; it is an oracle, never a
   production fallback.
 - Scalar bounds, sparse random traversal, particles, factor trees,
