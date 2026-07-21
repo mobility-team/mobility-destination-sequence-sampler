@@ -10,8 +10,8 @@ For each forward candidate destination, the proposal path builds three exact
 destination maps for the affected previous, current, and next activity
 factors. Missing entries are infeasible. Their support is intersected and the
 sum is partial-top-K selected without bins. Four propagated backward suffix
-hypotheses each contribute part of the 32-candidate budget; suffix-side maps
-are cached per context.
+hypotheses each contribute part of the 32-candidate budget; maps with the same
+fixed neighbours are cached per context.
 
 ## Evidence (Grand Geneve, 2026-07-21)
 
@@ -20,7 +20,7 @@ are cached per context.
   heuristic 0.707. It has 69 proven contexts (99.4% coverage); an independent
   seed-43 three-per-stratum cohort gives 0.774 over 36 (91.5%).
 - Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones,
-  eight threads: factor-map depth 5 23.011 s, 70,325 complete; inside 30 s.
+  eight threads: factor-map depth 5 15.5 s, 70,320 complete; inside 30 s.
 
 Rejected: one suffix collapses geographically (0.488 pilot); eight suffixes
 split the fixed candidate budget (0.745); 32 proposals per source add beam

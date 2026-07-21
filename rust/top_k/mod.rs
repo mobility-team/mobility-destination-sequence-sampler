@@ -80,8 +80,11 @@ struct LocalScoreCache {
 
 #[derive(Default)]
 struct FactorMapCache {
-    /// The next-activity factor depends only on the retained suffix state, so
-    /// it is shared by every forward parent evaluated against that suffix.
+    /// Each exact map is indexed by the destination being proposed at the
+    /// current layer.  The fixed neighbours in its key make it reusable across
+    /// equivalent retained states without weakening rigidity feasibility.
+    previous: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
+    current: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
     next: HashMap<(usize, usize, Option<usize>), Vec<Option<f64>>>,
 }
 
@@ -390,7 +393,7 @@ fn factor_map_candidates(
     inputs: &SearchInputs<'_>,
     request: FactorMapRequest<'_>,
     suffix_nodes: &[SuffixNode],
-    next_maps: &mut FactorMapCache,
+    maps: &mut FactorMapCache,
 ) -> Result<Vec<usize>, SamplerError> {
     if let Some(zone) = request.anchor_slot.and_then(|slot| request.anchors[slot]) {
         return Ok(vec![zone]);
@@ -408,27 +411,40 @@ fn factor_map_candidates(
                 origin: inputs.context.initial_zone,
             })?;
     let zone_count = inputs.graph.zone_ids.len();
-    let mut previous_map = vec![None; zone_count];
-    for &destination in domain {
-        previous_map[destination] = if let Some(previous_zone) = request.previous_zone {
-            score_local_weight(
-                inputs.scoring(),
-                request.layer - 1,
-                previous_zone,
-                request.origin,
-                Some(destination),
-            )
-        } else {
-            initial_endpoint_score(
-                inputs.graph,
-                inputs.destinations,
-                inputs.context,
-                destination,
-                inputs.parameters,
-            )
-            .map(|_| 0.0)
-        };
-    }
+    let initial_previous_map;
+    let previous_map = if let Some(previous_zone) = request.previous_zone {
+        maps.previous
+            .entry((request.layer - 1, previous_zone, request.origin))
+            .or_insert_with(|| {
+                let mut map = vec![None; zone_count];
+                for &destination in domain {
+                    map[destination] = score_local_weight(
+                        inputs.scoring(),
+                        request.layer - 1,
+                        previous_zone,
+                        request.origin,
+                        Some(destination),
+                    );
+                }
+                map
+            })
+    } else {
+        initial_previous_map =
+            domain
+                .iter()
+                .fold(vec![None; zone_count], |mut map, &destination| {
+                    map[destination] = initial_endpoint_score(
+                        inputs.graph,
+                        inputs.destinations,
+                        inputs.context,
+                        destination,
+                        inputs.parameters,
+                    )
+                    .map(|_| 0.0);
+                    map
+                });
+        &initial_previous_map
+    };
     let compare = |left: &(f64, usize), right: &(f64, usize)| {
         right
             .0
@@ -440,7 +456,23 @@ fn factor_map_candidates(
         let suffix = &suffix_nodes[suffix_index];
         let next_zone = suffix.zone;
         let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
-        let next_map = next_maps
+        let current_map = maps
+            .current
+            .entry((request.layer, request.origin, next_zone))
+            .or_insert_with(|| {
+                let mut map = vec![None; zone_count];
+                for &destination in domain {
+                    map[destination] = score_local_weight(
+                        inputs.scoring(),
+                        request.layer,
+                        request.origin,
+                        destination,
+                        Some(next_zone),
+                    );
+                }
+                map
+            });
+        let next_map = maps
             .next
             .entry((request.layer + 1, next_zone, next_next_zone))
             .or_insert_with(|| {
@@ -456,16 +488,6 @@ fn factor_map_candidates(
                 }
                 map
             });
-        let mut current_map = vec![None; zone_count];
-        for &destination in domain {
-            current_map[destination] = score_local_weight(
-                inputs.scoring(),
-                request.layer,
-                request.origin,
-                destination,
-                Some(next_zone),
-            );
-        }
         let mut ranked = domain
             .iter()
             .filter_map(|&destination| {
