@@ -456,7 +456,7 @@ fn factor_map_candidates(
             .total_cmp(&left.0)
             .then_with(|| left.1.cmp(&right.1))
     };
-    let mut best_scores = vec![None; zone_count];
+    let mut result = Vec::with_capacity(request.candidate_limit * request.suffixes.len());
     for &suffix_index in request.suffixes {
         let suffix = &suffix_nodes[suffix_index];
         let next_zone = suffix.zone;
@@ -493,34 +493,22 @@ fn factor_map_candidates(
                 }
                 map
             });
-        for &destination in domain {
-            let Some(score) = previous_map[destination]
-                .zip(current_map[destination])
-                .zip(next_map[destination])
-                .map(|((previous, current), next)| {
-                    previous + current + next + suffix.exact_log_weight
-                })
-            else {
-                continue;
-            };
-            if best_scores[destination].is_none_or(|best| score > best) {
-                best_scores[destination] = Some(score);
-            }
+        let mut ranked = domain
+            .iter()
+            .filter_map(|&destination| {
+                Some((
+                    previous_map[destination]? + current_map[destination]? + next_map[destination]?,
+                    destination,
+                ))
+            })
+            .collect::<Vec<_>>();
+        if ranked.len() > request.candidate_limit {
+            ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
+            ranked.truncate(request.candidate_limit);
         }
+        result.extend(ranked.into_iter().map(|(_, destination)| destination));
     }
-    let mut ranked = domain
-        .iter()
-        .filter_map(|&destination| best_scores[destination].map(|score| (score, destination)))
-        .collect::<Vec<_>>();
-    if ranked.len() > request.candidate_limit {
-        ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
-        ranked.truncate(request.candidate_limit);
-    }
-    ranked.sort_unstable_by(compare);
-    Ok(ranked
-        .into_iter()
-        .map(|(_, destination)| destination)
-        .collect())
+    Ok(result)
 }
 
 /// Use maps whose terms are available from one leg to shortlist candidates,
@@ -774,8 +762,12 @@ fn forward_beam(
                             .domain(context.steps[layer].activity_id)
                             .map_or(0, |domain| domain.len() as u64 * map_count as u64);
                     }
-                    let total_limit = inputs.options.proposal_limit_per_source.saturating_mul(2);
-                    let mut result = Vec::with_capacity(total_limit);
+                    let per_map_limit = inputs
+                        .options
+                        .proposal_limit_per_source
+                        .saturating_mul(2)
+                        .div_ceil(map_count);
+                    let mut result = Vec::with_capacity(per_map_limit * map_count);
                     let request = FactorMapRequest {
                         layer,
                         previous_zone,
@@ -783,7 +775,7 @@ fn forward_beam(
                         suffixes: &factor_suffixes[..map_count],
                         anchor_slot: candidate_slot,
                         anchors: &parent.anchors,
-                        candidate_limit: total_limit,
+                        candidate_limit: per_map_limit,
                     };
                     result.extend(
                         if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
