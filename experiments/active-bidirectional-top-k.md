@@ -16,7 +16,7 @@ are cached per context.
 ## Evidence (Grand Geneve, 2026-07-21)
 
 - Global five-per-stratum audit: weighted `Mass@10` 0.784 at width 40,
-  versus 0.772 at width 32, centred factor-map 0.767, surface 0.735, and
+  versus 0.772 at width 32, centred factor-map 0.759, surface 0.735, and
   heuristic 0.707. It has 69 proven contexts (99.4% coverage); an independent
   seed-43 three-per-stratum cohort gives 0.774 over 36 (91.5%).
 - Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones,

@@ -19,6 +19,7 @@ zones), eight threads; `frontier_width=40`, `proposal_limit_per_source=16`,
 The default remains comfortably within the 30-second target. A five-per-stratum
 audit (69 oracle-proven contexts; 99.4% population coverage) estimates
 `Mass@10` at 0.784 (width 32: 0.772; surface 0.735; heuristic 0.707).
+On the identical 69 contexts, the centred stitch scores 0.759.
 An independent seed-43, three-per-stratum cohort estimates 0.774 over 36
 oracle-proven contexts (91.5% coverage).
 Older throughput and
