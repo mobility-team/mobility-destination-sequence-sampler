@@ -76,12 +76,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stitch-bias", type=int, default=1)
     parser.add_argument("--continuation-state-limit", type=int, default=1)
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
-    parser.add_argument(
-        "--map-guidance-state-limit",
-        type=int,
-        default=0,
-        help="wider reverse reservoir used only to propose factor-map destinations",
-    )
     parser.add_argument("--seam-refresh-per-prefix", type=int, default=1)
     parser.add_argument("--archetype-strata-limit", type=int, default=12)
     parser.add_argument(
@@ -743,7 +737,6 @@ def compare_seed(
                     stitch_bias=args.stitch_bias,
                     continuation_state_limit=args.continuation_state_limit,
                     continuation_proposal_limit=args.continuation_proposal_limit,
-                    map_guidance_state_limit=args.map_guidance_state_limit,
                     seam_refresh_per_prefix=args.seam_refresh_per_prefix,
                     top_k=top_k,
                     n_threads=1,
