@@ -75,6 +75,15 @@ struct BackwardMessages {
     /// through the prefix layers. It guides proposal/ranking but never limits
     /// the wider frontier used for the exact final stitch.
     guidance_frontiers: Vec<Vec<usize>>,
+    /// Independent right-to-left partial messages used only by the symmetric
+    /// proposal channel. Exact suffix ownership remains in `nodes`.
+    partial_frontiers: Vec<Vec<usize>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BackwardGuidanceMode {
+    Exact,
+    Partial,
 }
 
 #[derive(Default)]
@@ -829,6 +838,8 @@ fn forward_beam(
     let continuation_state_limit = inputs.options.continuation_state_limit;
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
     let factor_map_guidance_limit = continuation_state_limit.max(4);
+    let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
+    let partial_beam_reserve = beam_width.div_ceil(10).max(1);
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let factor_map_cache = &mut scratch.factor_map_cache;
@@ -856,6 +867,7 @@ fn forward_beam(
     for layer in 0..=stitch_layer {
         let mut children = Vec::new();
         let mut scores = Vec::new();
+        let mut partial_scores = Vec::new();
         let mut pairs = Vec::new();
         for (state_index, &parent_index) in frontier.iter().enumerate() {
             let parent = &nodes[parent_index];
@@ -950,6 +962,41 @@ fn forward_beam(
                 }
                 _ => candidates(candidate_inputs, query, candidate_cache)?,
             };
+            if symmetric && unassigned {
+                let partial_suffixes = backward
+                    .partial_frontiers
+                    .get(layer + 1)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let map_count = partial_suffixes.len().min(factor_map_guidance_limit);
+                if map_count > 0 {
+                    let map_started = profile.then(Instant::now);
+                    if context.steps[layer].fixed_destination.is_none() {
+                        report.factor_map_destination_evaluations += destinations
+                            .domain(context.steps[layer].activity_id)
+                            .map_or(0, |domain| domain.len() as u64 * map_count as u64);
+                    }
+                    let per_map_limit = candidate_count.div_ceil(map_count);
+                    candidate_zones.extend(factor_map_candidates(
+                        inputs,
+                        FactorMapRequest {
+                            layer,
+                            previous_zone,
+                            origin: parent.zone,
+                            suffixes: &partial_suffixes[..map_count],
+                            anchor_slot: candidate_slot,
+                            anchors: &parent.anchors,
+                            candidate_limit: per_map_limit,
+                        },
+                        &backward.nodes,
+                        factor_map_cache,
+                        factor_map_ranked,
+                    )?);
+                    if let Some(started) = map_started {
+                        report.factor_map_ns += started.elapsed().as_nanos() as u64;
+                    }
+                }
+            }
             let proposal_guidance_started = profile.then(Instant::now);
             if candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none()) {
                 if let Some(suffix_frontier) = backward.guidance_frontiers.get(layer + 1) {
@@ -1013,6 +1060,41 @@ fn forward_beam(
                                 local_scores,
                             )
                         });
+                    let primary_score = continuation_score
+                        .map(|score| prefix_score + score)
+                        .unwrap_or_else(|| {
+                            if layer == 0 {
+                                local_score
+                            } else {
+                                prefix_score
+                            }
+                        });
+                    let partial_score = if symmetric {
+                        backward
+                            .partial_frontiers
+                            .get(layer + 1)
+                            .filter(|frontier| continuation_state_limit > 0 && !frontier.is_empty())
+                            .and_then(|suffix_frontier| {
+                                best_continuation_score(
+                                    inputs,
+                                    ContinuationCandidate {
+                                        layer,
+                                        previous_zone: parent.zone,
+                                        destination: candidate,
+                                        prefix_anchors: &parent.anchors,
+                                        anchor_slot: candidate_slot,
+                                    },
+                                    &backward.nodes,
+                                    &suffix_frontier
+                                        [..suffix_frontier.len().min(continuation_state_limit)],
+                                    local_scores,
+                                )
+                            })
+                            .map(|score| prefix_score + score)
+                            .unwrap_or(primary_score)
+                    } else {
+                        primary_score
+                    };
                     if let Some(started) = continuation_started {
                         report.continuation_guidance_ns += started.elapsed().as_nanos() as u64;
                     }
@@ -1022,17 +1104,8 @@ fn forward_beam(
                         if layer == 0 { 0.0 } else { local_score },
                     ));
                     pairs.push((parent.zone, candidate));
-                    scores.push(
-                        continuation_score
-                            .map(|score| prefix_score + score)
-                            .unwrap_or_else(|| {
-                                if layer == 0 {
-                                    local_score
-                                } else {
-                                    prefix_score
-                                }
-                            }),
-                    );
+                    scores.push(primary_score);
+                    partial_scores.push(partial_score);
                 }
             }
         }
@@ -1040,11 +1113,22 @@ fn forward_beam(
             frontier.clear();
             break;
         }
-        let retained = retain_pair_alternatives(
+        let mut retained = retain_pair_alternatives(
             &scores,
             &pairs,
             (inputs.options.result_limit as usize).min(beam_width),
         );
+        if symmetric {
+            for index in retain_pair_alternatives(
+                &partial_scores,
+                &pairs,
+                (inputs.options.result_limit as usize).min(partial_beam_reserve),
+            ) {
+                if !retained.contains(&index) {
+                    retained.push(index);
+                }
+            }
+        }
         let children = retained
             .iter()
             .map(|&index| children[index])
@@ -1053,7 +1137,19 @@ fn forward_beam(
             .iter()
             .map(|&index| scores[index])
             .collect::<Vec<_>>();
-        frontier = select_beam_indices(&scores, beam_width)
+        let partial_scores = retained
+            .iter()
+            .map(|&index| partial_scores[index])
+            .collect::<Vec<_>>();
+        let mut selected = select_beam_indices(&scores, beam_width);
+        if symmetric {
+            for index in select_beam_indices(&partial_scores, partial_beam_reserve) {
+                if !selected.contains(&index) {
+                    selected.push(index);
+                }
+            }
+        }
+        frontier = selected
             .into_iter()
             .map(|index| {
                 let (parent_index, destination, exact_increment) = children[index];
@@ -1292,13 +1388,9 @@ fn backward_beam(
     let context = inputs.context;
     let beam_width = inputs.options.frontier_width;
     let candidate_count = inputs.options.proposal_limit_per_source;
-    let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
-    let reverse_map_state_limit = inputs.options.continuation_state_limit.max(4);
     let anchor_slots = &inputs.anchor_slots;
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
-    let factor_map_cache = &mut scratch.factor_map_cache;
-    let factor_map_ranked = &mut scratch.factor_map_ranked;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
     let candidate_inputs = CandidateInputs {
@@ -1333,9 +1425,6 @@ fn backward_beam(
         let mut scores = Vec::new();
         let mut pairs = Vec::new();
         for (state_index, &next_index) in frontier.iter().enumerate() {
-            if symmetric && state_index >= reverse_map_state_limit {
-                break;
-            }
             let next = &nodes[next_index];
             let next_zone = next.zone;
             let query = CandidateQuery {
@@ -1349,37 +1438,7 @@ fn backward_beam(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| nodes[index].zone);
-            let reverse_candidates = if symmetric {
-                let map_started = profile.then(Instant::now);
-                if context.steps[layer].fixed_destination.is_none()
-                    && query
-                        .anchor_slot
-                        .is_none_or(|slot| query.anchors[slot].is_none())
-                {
-                    report.factor_map_destination_evaluations += destinations
-                        .domain(context.steps[layer].activity_id)
-                        .map_or(0, |domain| domain.len() as u64);
-                }
-                let result = reverse_factor_map_candidates(
-                    inputs,
-                    ReverseFactorMapRequest {
-                        layer,
-                        next_zone,
-                        next_next_zone,
-                        anchor_slot: query.anchor_slot,
-                        anchors: query.anchors,
-                        candidate_limit: candidate_count.saturating_mul(2),
-                    },
-                    factor_map_cache,
-                    factor_map_ranked,
-                )?;
-                if let Some(started) = map_started {
-                    report.factor_map_ns += started.elapsed().as_nanos() as u64;
-                }
-                result
-            } else {
-                candidates(candidate_inputs, query, candidate_cache)?
-            };
+            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -1390,23 +1449,9 @@ fn backward_beam(
                     next_next_zone,
                 );
                 if let Some(score) = score {
-                    let partial = if symmetric {
-                        let Some(partial) = reverse_prefix_partial_score(
-                            inputs,
-                            layer,
-                            candidate,
-                            query.anchors,
-                            query.anchor_slot,
-                        ) else {
-                            continue;
-                        };
-                        partial
-                    } else {
-                        0.0
-                    };
                     children.push((next_index, candidate, score));
                     pairs.push((candidate, next_zone));
-                    scores.push(next.exact_log_weight + score + partial);
+                    scores.push(next.exact_log_weight + score);
                 }
             }
         }
@@ -1454,6 +1499,7 @@ fn backward_beam(
         nodes,
         frontiers,
         guidance_frontiers: vec![Vec::new(); context.steps.len()],
+        partial_frontiers: vec![Vec::new(); context.steps.len()],
     })
 }
 
@@ -1462,11 +1508,11 @@ fn extend_backward_guidance(
     scratch: &mut SearchScratch,
     stitch_layer: usize,
     messages: &mut BackwardMessages,
+    mode: BackwardGuidanceMode,
 ) -> Result<(), SamplerError> {
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
     let guidance_width = if matches!(
         inputs.options.candidate_strategy,
         CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
@@ -1498,7 +1544,14 @@ fn extend_backward_guidance(
         .copied()
         .take(guidance_width)
         .collect::<Vec<_>>();
-    messages.guidance_frontiers[stitch_layer + 1] = frontier.clone();
+    match mode {
+        BackwardGuidanceMode::Exact => {
+            messages.guidance_frontiers[stitch_layer + 1] = frontier.clone()
+        }
+        BackwardGuidanceMode::Partial => {
+            messages.partial_frontiers[stitch_layer + 1] = frontier.clone()
+        }
+    }
     for layer in (0..=stitch_layer).rev() {
         let mut children = Vec::new();
         let mut scores = Vec::new();
@@ -1517,7 +1570,7 @@ fn extend_backward_guidance(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
-            let reverse_candidates = if symmetric {
+            let reverse_candidates = if mode == BackwardGuidanceMode::Partial {
                 let map_started = profile.then(Instant::now);
                 if context.steps[layer].fixed_destination.is_none()
                     && query
@@ -1558,7 +1611,7 @@ fn extend_backward_guidance(
                     next_next_zone,
                 );
                 if let Some(score) = score {
-                    let partial = if symmetric {
+                    let partial = if mode == BackwardGuidanceMode::Partial {
                         let Some(partial) = reverse_prefix_partial_score(
                             inputs,
                             layer,
@@ -1613,7 +1666,10 @@ fn extend_backward_guidance(
                 node_index
             })
             .collect();
-        messages.guidance_frontiers[layer] = frontier.clone();
+        match mode {
+            BackwardGuidanceMode::Exact => messages.guidance_frontiers[layer] = frontier.clone(),
+            BackwardGuidanceMode::Partial => messages.partial_frontiers[layer] = frontier.clone(),
+        }
     }
     if let Some(started) = started {
         report.backward_guidance_ns += started.elapsed().as_nanos() as u64;
@@ -1805,7 +1861,22 @@ fn search_context(
         .clamp(0, inputs.context.steps.len() as i32 - 2) as usize;
     let backward = backward_beam(&inputs, &mut scratch, stitch_layer + 1)?;
     let mut backward = backward;
-    extend_backward_guidance(&inputs, &mut scratch, stitch_layer, &mut backward)?;
+    extend_backward_guidance(
+        &inputs,
+        &mut scratch,
+        stitch_layer,
+        &mut backward,
+        BackwardGuidanceMode::Exact,
+    )?;
+    if inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap {
+        extend_backward_guidance(
+            &inputs,
+            &mut scratch,
+            stitch_layer,
+            &mut backward,
+            BackwardGuidanceMode::Partial,
+        )?;
+    }
     let (prefix_nodes, forward) = forward_beam(&inputs, &mut scratch, stitch_layer, &backward)?;
     refresh_stitch_frontier(
         &inputs,
