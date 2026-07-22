@@ -166,6 +166,15 @@ def main() -> None:
         f"stitch-pairs={bidirectional_report['stitch_pairs']} "
         f"infeasible={bidirectional_report['infeasible_contexts']}"
     )
+    print(
+        "factor-map cache "
+        f"previous={bidirectional_report['factor_map_previous_hits']}/"
+        f"{bidirectional_report['factor_map_previous_builds']} hit/build "
+        f"current={bidirectional_report['factor_map_current_hits']}/"
+        f"{bidirectional_report['factor_map_current_builds']} hit/build "
+        f"next={bidirectional_report['factor_map_next_hits']}/"
+        f"{bidirectional_report['factor_map_next_builds']} hit/build"
+    )
     if args.profile:
         total_ns = bidirectional_report["total_search_ns"]
         if total_ns:

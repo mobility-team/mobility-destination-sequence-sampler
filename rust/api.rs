@@ -198,6 +198,18 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
         "factor_map_destinations_evaluated",
         report.factor_map_destination_evaluations,
     )?;
+    result.set_item("factor_map_previous_hits", report.factor_map_previous_hits)?;
+    result.set_item(
+        "factor_map_previous_builds",
+        report.factor_map_previous_builds,
+    )?;
+    result.set_item("factor_map_current_hits", report.factor_map_current_hits)?;
+    result.set_item(
+        "factor_map_current_builds",
+        report.factor_map_current_builds,
+    )?;
+    result.set_item("factor_map_next_hits", report.factor_map_next_hits)?;
+    result.set_item("factor_map_next_builds", report.factor_map_next_builds)?;
     result.set_item("continuation_proposals", report.continuation_proposals)?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;

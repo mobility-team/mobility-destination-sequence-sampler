@@ -161,13 +161,38 @@ pub(crate) fn score_local_weight_edges(
     let (_, arrival) = adjusted_times(step, edge)?;
     let terminal_fixed_destination =
         layer + 1 == inputs.context.steps.len() && step.fixed_destination.is_some();
+    let next_departure = if terminal_fixed_destination || !inputs.parameters.update_plan_timings {
+        None
+    } else {
+        let next_step = inputs.context.steps.get(layer + 1)?;
+        let next_edge = next_edge?;
+        Some(adjusted_times(*next_step, next_edge)?.0)
+    };
+    score_local_weight_from_times(inputs, layer, destination, edge, arrival, next_departure)
+}
+
+/// Exact local scoring with already-adjusted timing terms.
+///
+/// Factor-map builders use this when an inbound arrival or next departure is
+/// fixed across an entire destination map. It preserves the exact scorer's
+/// rigidity and feasibility semantics while avoiding repeated adjustment of
+/// that fixed leg.
+#[inline]
+pub(crate) fn score_local_weight_from_times(
+    inputs: ScoringInputs<'_>,
+    layer: usize,
+    destination: usize,
+    edge: Edge,
+    arrival: f64,
+    next_departure: Option<f64>,
+) -> Option<f64> {
+    let step = inputs.context.steps[layer];
+    let terminal_fixed_destination =
+        layer + 1 == inputs.context.steps.len() && step.fixed_destination.is_some();
     let duration = if terminal_fixed_destination {
         MIN_ACTIVITY_DURATION_HOURS
     } else if inputs.parameters.update_plan_timings {
-        let next_step = inputs.context.steps.get(layer + 1)?;
-        let next_edge = next_edge?;
-        let (next_departure, _) = adjusted_times(*next_step, next_edge)?;
-        let duration = next_departure - arrival;
+        let duration = next_departure? - arrival;
         if duration <= 0.0 {
             return None;
         }

@@ -6,7 +6,7 @@
 //! owning front, and scores only the two factors crossing the stitch boundary when
 //! stitching.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -16,8 +16,9 @@ use crate::input::Context;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
 use crate::scoring::{
-    build_scoring_problem, fixed_destination_value, score_local_weight, score_local_weight_edges,
-    score_zones, Parameters, ScoringInputs, ScoringProblem,
+    adjusted_times, build_scoring_problem, fixed_destination_value, score_local_weight,
+    score_local_weight_edges, score_local_weight_from_times, score_zones, Parameters,
+    ScoringInputs, ScoringProblem,
 };
 
 mod candidates;
@@ -83,9 +84,22 @@ struct FactorMapCache {
     /// Each exact map is indexed by the destination being proposed at the
     /// current layer.  The fixed neighbours in its key make it reusable across
     /// equivalent retained states without weakening rigidity feasibility.
-    previous: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
-    current: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
-    next: HashMap<(usize, usize, Option<usize>), Vec<Option<f64>>>,
+    previous: HashMap<(usize, usize, usize), FactorScoreMap>,
+    current: HashMap<(usize, usize, usize), FactorScoreMap>,
+    next: HashMap<(usize, usize, Option<usize>), FactorScoreMap>,
+    previous_hits: u64,
+    previous_builds: u64,
+    current_hits: u64,
+    current_builds: u64,
+    next_hits: u64,
+    next_builds: u64,
+}
+
+/// Feasible factor scores, aligned to an activity-domain position rather than
+/// the global zone index. Infeasible destinations are omitted completely.
+#[derive(Default)]
+struct FactorScoreMap {
+    entries: Vec<(usize, f64)>,
 }
 
 impl LocalScoreCache {
@@ -142,6 +156,12 @@ pub struct TopKReport {
     pub backward_candidate_evaluations: u64,
     pub surface_proposal_evaluations: u64,
     pub factor_map_destination_evaluations: u64,
+    pub factor_map_previous_hits: u64,
+    pub factor_map_previous_builds: u64,
+    pub factor_map_current_hits: u64,
+    pub factor_map_current_builds: u64,
+    pub factor_map_next_hits: u64,
+    pub factor_map_next_builds: u64,
     pub continuation_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
@@ -227,6 +247,16 @@ impl SearchScratch {
             },
         }
     }
+
+    fn into_report(mut self) -> TopKReport {
+        self.report.factor_map_previous_hits = self.factor_map_cache.previous_hits;
+        self.report.factor_map_previous_builds = self.factor_map_cache.previous_builds;
+        self.report.factor_map_current_hits = self.factor_map_cache.current_hits;
+        self.report.factor_map_current_builds = self.factor_map_cache.current_builds;
+        self.report.factor_map_next_hits = self.factor_map_cache.next_hits;
+        self.report.factor_map_next_builds = self.factor_map_cache.next_builds;
+        self.report
+    }
 }
 
 impl TopKReport {
@@ -236,6 +266,12 @@ impl TopKReport {
         self.backward_candidate_evaluations += other.backward_candidate_evaluations;
         self.surface_proposal_evaluations += other.surface_proposal_evaluations;
         self.factor_map_destination_evaluations += other.factor_map_destination_evaluations;
+        self.factor_map_previous_hits += other.factor_map_previous_hits;
+        self.factor_map_previous_builds += other.factor_map_previous_builds;
+        self.factor_map_current_hits += other.factor_map_current_hits;
+        self.factor_map_current_builds += other.factor_map_current_builds;
+        self.factor_map_next_hits += other.factor_map_next_hits;
+        self.factor_map_next_builds += other.factor_map_next_builds;
         self.continuation_proposals += other.continuation_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
@@ -413,49 +449,56 @@ fn factor_map_candidates(
                 context_id: inputs.context.context_id,
                 origin: inputs.context.initial_zone,
             })?;
-    let zone_count = inputs.graph.zone_ids.len();
-    let initial_previous_map;
-    let previous_map = if let Some(previous_zone) = request.previous_zone {
-        let inbound = inputs.graph.edge_to(previous_zone, request.origin);
-        maps.previous
+    let previous_map = request.previous_zone.map(|previous_zone| {
+        let map = match maps
+            .previous
             .entry((request.layer - 1, previous_zone, request.origin))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] = inbound.and_then(|inbound| {
-                        inputs
-                            .graph
-                            .edge_to(request.origin, destination)
-                            .and_then(|outbound| {
-                                score_local_weight_edges(
-                                    inputs.scoring(),
-                                    request.layer - 1,
-                                    request.origin,
-                                    inbound,
-                                    Some(outbound),
-                                )
-                            })
+        {
+            Entry::Occupied(entry) => {
+                maps.previous_hits += 1;
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => {
+                maps.previous_builds += 1;
+                entry.insert({
+                    let inbound = inputs.graph.edge_to(previous_zone, request.origin);
+                    let arrival = inbound.and_then(|edge| {
+                        adjusted_times(inputs.context.steps[request.layer - 1], edge)
+                            .map(|(_, arrival)| arrival)
                     });
-                }
-                map
-            })
-    } else {
-        initial_previous_map =
-            domain
-                .iter()
-                .fold(vec![None; zone_count], |mut map, &destination| {
-                    map[destination] = initial_endpoint_score(
-                        inputs.graph,
-                        inputs.destinations,
-                        inputs.context,
-                        destination,
-                        inputs.parameters,
-                    )
-                    .map(|_| 0.0);
+                    let mut map = FactorScoreMap {
+                        entries: Vec::with_capacity(domain.len()),
+                    };
+                    for (position, &destination) in domain.iter().enumerate() {
+                        let score = inbound.and_then(|inbound| {
+                            let outbound = inputs.graph.edge_to(request.origin, destination)?;
+                            let next_departure = if inputs.parameters.update_plan_timings {
+                                Some(
+                                    adjusted_times(inputs.context.steps[request.layer], outbound)?
+                                        .0,
+                                )
+                            } else {
+                                None
+                            };
+                            score_local_weight_from_times(
+                                inputs.scoring(),
+                                request.layer - 1,
+                                request.origin,
+                                inbound,
+                                arrival?,
+                                next_departure,
+                            )
+                        });
+                        if let Some(score) = score {
+                            map.entries.push((position, score));
+                        }
+                    }
                     map
-                });
-        &initial_previous_map
-    };
+                })
+            }
+        };
+        &*map
+    });
     let compare = |left: &(f64, usize), right: &(f64, usize)| {
         right
             .0
@@ -468,61 +511,136 @@ fn factor_map_candidates(
         let next_zone = suffix.zone;
         let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
         let current_map =
-            maps.current
+            match maps
+                .current
                 .entry((request.layer, request.origin, next_zone))
-                .or_insert_with(|| {
-                    let mut map = vec![None; zone_count];
-                    for &destination in domain {
-                        map[destination] = inputs
-                            .graph
-                            .edge_to(request.origin, destination)
-                            .and_then(|inbound| {
-                                inputs
-                                    .graph
-                                    .edge_to(destination, next_zone)
-                                    .and_then(|outbound| {
-                                        score_local_weight_edges(
-                                            inputs.scoring(),
-                                            request.layer,
-                                            destination,
-                                            inbound,
-                                            Some(outbound),
-                                        )
-                                    })
-                            });
-                    }
-                    map
-                });
-        let next_outbound = next_next_zone.and_then(|zone| inputs.graph.edge_to(next_zone, zone));
-        let next_map = maps
+            {
+                Entry::Occupied(entry) => {
+                    maps.current_hits += 1;
+                    entry.into_mut()
+                }
+                Entry::Vacant(entry) => {
+                    maps.current_builds += 1;
+                    entry.insert({
+                        let mut map = FactorScoreMap {
+                            entries: Vec::with_capacity(domain.len()),
+                        };
+                        for (position, &destination) in domain.iter().enumerate() {
+                            let score = inputs.graph.edge_to(request.origin, destination).and_then(
+                                |inbound| {
+                                    inputs.graph.edge_to(destination, next_zone).and_then(
+                                        |outbound| {
+                                            score_local_weight_edges(
+                                                inputs.scoring(),
+                                                request.layer,
+                                                destination,
+                                                inbound,
+                                                Some(outbound),
+                                            )
+                                        },
+                                    )
+                                },
+                            );
+                            if let Some(score) = score {
+                                map.entries.push((position, score));
+                            }
+                        }
+                        map
+                    })
+                }
+            };
+        let next_map = match maps
             .next
             .entry((request.layer + 1, next_zone, next_next_zone))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] =
+        {
+            Entry::Occupied(entry) => {
+                maps.next_hits += 1;
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => {
+                maps.next_builds += 1;
+                entry.insert({
+                    let next_outbound =
+                        next_next_zone.and_then(|zone| inputs.graph.edge_to(next_zone, zone));
+                    let next_departure = next_outbound.and_then(|edge| {
                         inputs
-                            .graph
-                            .edge_to(destination, next_zone)
-                            .and_then(|inbound| {
-                                score_local_weight_edges(
-                                    inputs.scoring(),
-                                    request.layer + 1,
-                                    next_zone,
-                                    inbound,
-                                    next_outbound,
-                                )
-                            });
-                }
-                map
-            });
+                            .context
+                            .steps
+                            .get(request.layer + 2)
+                            .and_then(|step| {
+                                adjusted_times(*step, edge).map(|(departure, _)| departure)
+                            })
+                    });
+                    let mut map = FactorScoreMap {
+                        entries: Vec::with_capacity(domain.len()),
+                    };
+                    for (position, &destination) in domain.iter().enumerate() {
+                        let score =
+                            inputs
+                                .graph
+                                .edge_to(destination, next_zone)
+                                .and_then(|inbound| {
+                                    let (_, arrival) = adjusted_times(
+                                        inputs.context.steps[request.layer + 1],
+                                        inbound,
+                                    )?;
+                                    score_local_weight_from_times(
+                                        inputs.scoring(),
+                                        request.layer + 1,
+                                        next_zone,
+                                        inbound,
+                                        arrival,
+                                        next_departure,
+                                    )
+                                });
+                        if let Some(score) = score {
+                            map.entries.push((position, score));
+                        }
+                    }
+                    map
+                })
+            }
+        };
         ranked.clear();
-        ranked.extend(domain.iter().filter_map(|&destination| {
-            Some((
-                previous_map[destination]? + current_map[destination]? + next_map[destination]?,
-                destination,
-            ))
-        }));
+        let mut current_index = 0;
+        let mut next_index = 0;
+        let mut previous_index = 0;
+        while current_index < current_map.entries.len() && next_index < next_map.entries.len() {
+            let current_position = current_map.entries[current_index].0;
+            let next_position = next_map.entries[next_index].0;
+            let mut position = current_position.max(next_position);
+            if let Some(previous_map) = previous_map {
+                if previous_index == previous_map.entries.len() {
+                    break;
+                }
+                position = position.max(previous_map.entries[previous_index].0);
+            }
+            let current = current_map.entries[current_index];
+            let next = next_map.entries[next_index];
+            let previous = previous_map.map(|map| map.entries[previous_index]);
+            if current.0 != position
+                || next.0 != position
+                || previous.is_some_and(|value| value.0 != position)
+            {
+                if current.0 < position {
+                    current_index += 1;
+                }
+                if next.0 < position {
+                    next_index += 1;
+                }
+                if previous.is_some_and(|value| value.0 < position) {
+                    previous_index += 1;
+                }
+                continue;
+            }
+            let previous_score = previous.map_or(0.0, |value| value.1);
+            ranked.push((previous_score + current.1 + next.1, domain[current.0]));
+            current_index += 1;
+            next_index += 1;
+            if previous_map.is_some() {
+                previous_index += 1;
+            }
+        }
         if ranked.len() > request.candidate_limit {
             ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
             ranked.truncate(request.candidate_limit);
@@ -1410,7 +1528,7 @@ fn search_context(
         if let Some(started) = started {
             scratch.report.total_search_ns += started.elapsed().as_nanos() as u64;
         }
-        return Ok((output, scratch.report));
+        return Ok((output, scratch.into_report()));
     }
     let balanced_stitch_layer = (inputs.context.steps.len() - 1) as i32 / 2;
     let stitch_layer = (balanced_stitch_layer + inputs.options.stitch_bias)
@@ -1512,7 +1630,7 @@ fn search_context(
     if let Some(started) = started {
         scratch.report.total_search_ns += started.elapsed().as_nanos() as u64;
     }
-    Ok((output, scratch.report))
+    Ok((output, scratch.into_report()))
 }
 
 pub fn search_top_k_all(
