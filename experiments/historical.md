@@ -16,6 +16,7 @@
 | Root-diverse ping-pong bridge | Rejected | Recovered context 26 (Mass@10 0.733→0.918), but a 15-context stratified audit was identical to baseline at 80% more bounded time (2.84→5.11 ms/context). |
 | Pooled suffix factor maps | Rejected | Concentrated support on one suffix: a matched five-context cohort fell from Mass@10 0.899 to 0.800 and slowed 3.04→4.81 ms/context. |
 | Independent map-guidance reservoir | Rejected | Recovered context 26 (0.733→0.904), but the 15-context stratified pilot was quality-identical at 3.1x bounded time (2.84→8.85 ms/context). |
+| Reverse-prefix compilation/query-cache pilot | Rejected | Median 1,000-context release time improved only 1.3% (0.539 to 0.532 s), while the full workload regressed to 31.146 s and 70,798 complete contexts. |
 
 Archived code and retired benchmark harnesses: `research-archive-2026-07-21`.
 The retained oracle is `rust/oracle.rs`. Details and compact lessons

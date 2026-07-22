@@ -20,6 +20,7 @@ test:
 check:
     cargo fmt --check; exit $LASTEXITCODE
     cargo clippy --all-targets -- -D warnings; exit $LASTEXITCODE
+    just build-release; exit $LASTEXITCODE
     mamba run -n mobility-destination-sequence-sampler python -m pytest; exit $LASTEXITCODE
 
 compare-quality: build-release

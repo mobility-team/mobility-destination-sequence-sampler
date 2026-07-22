@@ -12,6 +12,8 @@ from collections.abc import Callable
 import hashlib
 import json
 import math
+import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -160,10 +162,24 @@ ORACLE_CACHE_VERSION = 1
 
 def oracle_input_fingerprint(
     snapshot_files: dict[str, Path],
+    *,
+    logit_scale: float,
+    update_plan_timings: bool,
+    use_shadow_prices: bool,
 ) -> str:
     """Fingerprint exact-score inputs and the Rust code that defines them."""
     digest = hashlib.sha256()
     digest.update(f"oracle-cache-v{ORACLE_CACHE_VERSION}".encode())
+    digest.update(
+        json.dumps(
+            {
+                "logit_scale": logit_scale,
+                "update_plan_timings": update_plan_timings,
+                "use_shadow_prices": use_shadow_prices,
+            },
+            sort_keys=True,
+        ).encode()
+    )
     for name, path in sorted(snapshot_files.items()):
         digest.update(name.encode())
         with path.open("rb") as source:
@@ -203,13 +219,25 @@ class OracleCache:
         if error_path.exists():
             raise ValueError(json.loads(error_path.read_text())["error"])
         self.path.mkdir(parents=True, exist_ok=True)
+        def atomic_write(path: Path, payload: bytes) -> None:
+            with tempfile.NamedTemporaryFile(dir=self.path, delete=False) as temporary:
+                temporary.write(payload)
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, path)
+
         try:
             oracle_table, oracle_report = compute()
         except ValueError as error:
-            error_path.write_text(json.dumps({"error": str(error)}))
+            atomic_write(error_path, json.dumps({"error": str(error)}).encode())
             raise
-        oracle_table.write_parquet(table_path)
-        report_path.write_text(json.dumps(oracle_report))
+        with tempfile.NamedTemporaryFile(dir=self.path, suffix=".parquet", delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            oracle_table.write_parquet(temporary_path)
+            os.replace(temporary_path, table_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        atomic_write(report_path, json.dumps(oracle_report).encode())
         return oracle_table, oracle_report, False
 
 
@@ -1035,7 +1063,12 @@ def main() -> None:
     search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
     oracle_cache = None
     if not args.no_oracle_cache:
-        fingerprint = oracle_input_fingerprint(files)
+        fingerprint = oracle_input_fingerprint(
+            files,
+            logit_scale=LOGIT_SCALE,
+            update_plan_timings=True,
+            use_shadow_prices=True,
+        )
         oracle_cache = OracleCache(fingerprint, args.oracle_depth, args.max_states)
         print(f"Oracle cache: {oracle_cache.path}")
     profiles = context_profiles(steps)
