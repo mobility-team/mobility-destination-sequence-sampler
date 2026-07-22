@@ -3,7 +3,10 @@
 ## Scope
 
 Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
-`exact_top_k()` oracle. Retired paths are at `research-archive-2026-07-21`.
+`exact_top_k()` oracle. Retired paths are preserved by the Git tag
+`research-archive-2026-07-21`; inspect one with
+`git show research-archive-2026-07-21:<path>`. Do not restore archived source
+without a new, testable hypothesis.
 
 ## Commands
 
@@ -35,6 +38,8 @@ mechanical refactors.
   boundary: `rust/api.rs`.
 - Current decision/measurements: `experiments/active-bidirectional-top-k.md`,
   `BENCHMARKS.md`. Archive decisions: `experiments/historical.md`.
+- Working-model and option guide: `ACTIVE_SEARCH.md`. Read it before opening
+  `rust/top_k/mod.rs`; it maps tasks to the smallest relevant source files.
 
 ## Change rule
 

@@ -1,0 +1,46 @@
+# Measurement guide
+
+## Which harness to run
+
+| Question | Command | Primary result |
+|---|---|---|
+| Default bounded quality against proof | `just compare-quality` | Recall@10 and Mass@10 |
+| Output-size behavior | `just compare-k-sweep-seeds` | Recall/Mass across K against top-500 support |
+| Whole-workload budget | `just benchmark-throughput` | wall time, complete/infeasible contexts, profile counts |
+| Symmetric tuning | `just sweep-symmetric` | compact comparison of message/state/proposal widths |
+| Regression cases | `just canary-quality` | fixed difficult contexts with cached exact answers |
+
+`BENCHMARKS.md` is the active baseline. A benchmark is comparable only when it
+uses the listed workload, release build, and configuration.
+
+## Quality terms
+
+- **Recall@K**: fraction of exact top-K plans recovered.
+- **Mass@K**: exact top-K probability mass retained by the bounded result.
+- **Mass@500**: bounded result mass in one fixed exact top-500 reference;
+  use it to compare differing requested K values.
+- **Efficiency**: bounded result mass divided by the fixed reference mass as
+  reported by the harness.
+- **Complete / infeasible**: contexts that yielded a complete sequence or
+  none under the supplied feasibility/scoring inputs; this is not an oracle
+  accuracy measure.
+
+The oracle may reject a context at `max_states`. Coverage and exclusions from
+that outcome must remain visible; do not silently treat an unproven context as
+a bounded miss or hit.
+
+## Diagnostics that are deliberately not active support analysis
+
+`compare_bidirectional_top_k_grand_geneve.py` can print a **legacy heuristic
+trace** and labels such as `inside-legacy-pool; active stage unknown`. These
+diagnose the retired heuristic pool only. They do not locate loss within the
+active factor-map/symmetric policy and must not be used as direct tuning
+evidence.
+
+## Presets and duplication
+
+The Python quality and throughput harnesses both default to the active bounded
+configuration. `just` recipes may intentionally override a value for a
+historical comparison (for example, width 32 in the K sweep). Treat the
+recipe, its arguments, and the benchmark heading as one named preset; record a
+new preset in `BENCHMARKS.md` before calling it a new baseline.

@@ -19,7 +19,10 @@ the full rigidity-aware utility. See [`DESIGN.md`](DESIGN.md) for schemas and
 invariants.
 
 Only those paths are in the working tree. Particle, exhaustive-sampling, and
-second-order research is archived at `research-archive-2026-07-21`.
+second-order research is preserved by the `research-archive-2026-07-21` Git
+tag (for example, `git show research-archive-2026-07-21:<path>`). Start with
+[`ACTIVE_SEARCH.md`](ACTIVE_SEARCH.md) for the active algorithm and tuning
+contract.
 
 ## Development
 

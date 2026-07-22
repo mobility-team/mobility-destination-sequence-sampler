@@ -29,6 +29,7 @@ from experiments.benchmarks.perf_grand_geneve_cache import (
     prepare_od_costs,
     resolve_snapshot_files,
 )
+from experiments.top_k_config import add_top_k_tuning_arguments, top_k_tuning_options
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,29 +69,13 @@ def parse_args() -> argparse.Namespace:
         help="fixed exact-plan support used to normalize all requested K values",
     )
     parser.add_argument("--max-states", type=int, default=2_000_000)
-    parser.add_argument("--frontier-width", type=int, default=40)
-    parser.add_argument("--proposal-limit-per-source", type=int, default=16)
-    parser.add_argument("--symmetric-message-limit", type=int, default=4)
-    parser.add_argument("--symmetric-state-limit", type=int, default=4)
-    parser.add_argument("--symmetric-forward-proposal-limit", type=int, default=8)
+    add_top_k_tuning_arguments(parser)
     parser.add_argument(
         "--symmetric-config",
         action="append",
         metavar="LABEL:MESSAGES:STATES:PROPOSALS",
         help="repeat to compare symmetric configurations in one prepared process",
     )
-    parser.add_argument(
-        "--candidate-strategy",
-        choices=("surface", "factor_map", "symmetric_factor_map", "heuristic"),
-        default="symmetric_factor_map",
-        help="bounded proposal policy (default: symmetric_factor_map)",
-    )
-    parser.add_argument("--surface-bins", type=int, choices=(2, 4), default=2)
-    parser.add_argument("--factor-map-max-depth", type=int, default=5)
-    parser.add_argument("--stitch-bias", type=int, default=1)
-    parser.add_argument("--continuation-state-limit", type=int, default=1)
-    parser.add_argument("--continuation-proposal-limit", type=int, default=1)
-    parser.add_argument("--seam-refresh-per-prefix", type=int, default=1)
     parser.add_argument("--archetype-strata-limit", type=int, default=12)
     parser.add_argument(
         "--context-id",
@@ -900,18 +885,7 @@ def compare_seed(
                     update_plan_timings=True,
                     use_shadow_prices=True,
                     exploration_seed=exploration_seed,
-                    frontier_width=args.frontier_width,
-                    proposal_limit_per_source=args.proposal_limit_per_source,
-                    symmetric_message_limit=args.symmetric_message_limit,
-                    symmetric_state_limit=args.symmetric_state_limit,
-                    symmetric_forward_proposal_limit=args.symmetric_forward_proposal_limit,
-                    candidate_strategy=args.candidate_strategy,
-                    surface_bins=args.surface_bins,
-                    factor_map_max_depth=args.factor_map_max_depth,
-                    stitch_bias=args.stitch_bias,
-                    continuation_state_limit=args.continuation_state_limit,
-                    continuation_proposal_limit=args.continuation_proposal_limit,
-                    seam_refresh_per_prefix=args.seam_refresh_per_prefix,
+                    **top_k_tuning_options(args),
                     top_k=top_k,
                     n_threads=1,
                     skip_infeasible=False,

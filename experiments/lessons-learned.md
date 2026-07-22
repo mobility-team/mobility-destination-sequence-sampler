@@ -15,5 +15,5 @@
 - Scalar bounds, sparse random traversal, particles, factor trees,
   second-order raw-zone recursion, and hierarchical kernels are archived.
 
-Measurements live beside the relevant experiment; source is tagged
-`research-archive-2026-07-21`.
+Measurements live beside the relevant experiment; retired source is preserved
+by the `research-archive-2026-07-21` Git tag.

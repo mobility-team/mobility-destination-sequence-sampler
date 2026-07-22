@@ -12,5 +12,7 @@ Only bounded bidirectional top-K is active.
 | Archived directions | `historical.md`, `lessons-learned.md` |
 
 The next hypothesis is continuation-aware support for early forward proposals.
-Archived source is recoverable at `research-archive-2026-07-21`; do not revive
-it without a new, testable hypothesis.
+Archived source is recoverable from the `research-archive-2026-07-21` Git tag
+(`git show research-archive-2026-07-21:<path>`); do not revive it without a
+new, testable hypothesis. [`measurement-guide.md`](measurement-guide.md)
+defines the active harness outputs and historical diagnostics.

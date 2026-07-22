@@ -1,7 +1,7 @@
 # Archived synthetic sampler
 
 The exact backward-forward sampling baseline was archived at
-`research-archive-2026-07-21`. Its useful lesson was to reuse prepared indexes
+the `research-archive-2026-07-21` Git tag. Its useful lesson was to reuse prepared indexes
 and group structurally identical contexts; it is not a basis for active top-K
 parameter choices.
 
