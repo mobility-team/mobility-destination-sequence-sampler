@@ -8,6 +8,9 @@ depths and retains oracle failures as coverage data.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+import hashlib
+import json
 import math
 import time
 from pathlib import Path
@@ -96,7 +99,70 @@ def parse_args() -> argparse.Namespace:
         help="candidate-context hash seed; repeat for independent validation cohorts",
     )
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument(
+        "--no-oracle-cache",
+        action="store_true",
+        help="recompute exact cases instead of reusing fingerprinted oracle results",
+    )
     return parser.parse_args()
+
+
+ORACLE_CACHE_VERSION = 1
+
+
+def oracle_input_fingerprint(
+    snapshot_files: dict[str, Path],
+) -> str:
+    """Fingerprint exact-score inputs and the Rust code that defines them."""
+    digest = hashlib.sha256()
+    digest.update(f"oracle-cache-v{ORACLE_CACHE_VERSION}".encode())
+    for name, path in sorted(snapshot_files.items()):
+        digest.update(name.encode())
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+    root = Path(__file__).resolve().parents[2]
+    for relative_path in (
+        "experiments/benchmarks/perf_grand_geneve_cache.py",
+        "rust/oracle.rs",
+        "rust/scoring.rs",
+        "rust/model.rs",
+        "rust/input.rs",
+    ):
+        digest.update((root / relative_path).read_bytes())
+    return digest.hexdigest()[:20]
+
+
+class OracleCache:
+    """Persistent exact results; the fingerprint prevents stale proof reuse."""
+
+    def __init__(self, fingerprint: str, oracle_depth: int, max_states: int) -> None:
+        self.path = Path("experiments/.cache/oracle-top-k") / fingerprint
+        self.oracle_depth = oracle_depth
+        self.max_states = max_states
+
+    def load_or_compute(
+        self,
+        context_id: int,
+        compute: Callable[[], tuple[pl.DataFrame, dict[str, int]]],
+    ) -> tuple[pl.DataFrame, dict[str, int], bool]:
+        stem = f"context-{context_id}-k{self.oracle_depth}-states-{self.max_states}"
+        table_path = self.path / f"{stem}.parquet"
+        report_path = self.path / f"{stem}.json"
+        error_path = self.path / f"{stem}.error.json"
+        if table_path.exists() and report_path.exists():
+            return pl.read_parquet(table_path), json.loads(report_path.read_text()), True
+        if error_path.exists():
+            raise ValueError(json.loads(error_path.read_text())["error"])
+        self.path.mkdir(parents=True, exist_ok=True)
+        try:
+            oracle_table, oracle_report = compute()
+        except ValueError as error:
+            error_path.write_text(json.dumps({"error": str(error)}))
+            raise
+        oracle_table.write_parquet(table_path)
+        report_path.write_text(json.dumps(oracle_report))
+        return oracle_table, oracle_report, False
 
 
 def eligible_context_ids(
@@ -634,6 +700,7 @@ def compare_seed(
     profiles: pl.DataFrame,
     profile_by_context: dict[int, tuple[int, int, int, str]],
     population_by_stratum: dict[str, int],
+    oracle_cache: OracleCache | None,
 ) -> None:
     proven = 0
     skipped = 0
@@ -663,6 +730,8 @@ def compare_seed(
         for top_k in top_ks
     }
     exact_search_seconds = 0.0
+    oracle_cache_hits = 0
+    oracle_cache_misses = 0
     bounded_search_seconds = {top_k: 0.0 for top_k in top_ks}
     layer_metrics = {top_k: {} for top_k in top_ks}
     archetype_metrics = {top_k: {} for top_k in top_ks}
@@ -676,7 +745,7 @@ def compare_seed(
         context_initial = initial_locations.filter(pl.col("context_id") == context_id)
         try:
             oracle_started = time.perf_counter()
-            oracle_table, oracle_report = search.exact_top_k(
+            compute_oracle = lambda: search.exact_top_k(
                 steps=context_steps,
                 initial_locations=context_initial,
                 logit_scale=LOGIT_SCALE,
@@ -687,7 +756,18 @@ def compare_seed(
                 n_threads=1,
                 skip_infeasible=False,
             )
-            exact_search_seconds += time.perf_counter() - oracle_started
+            if oracle_cache is None:
+                oracle_table, oracle_report = compute_oracle()
+                oracle_cache_misses += 1
+                exact_search_seconds += time.perf_counter() - oracle_started
+            else:
+                oracle_table, oracle_report, cached = oracle_cache.load_or_compute(
+                    context_id, compute_oracle
+                )
+                oracle_cache_hits += int(cached)
+                oracle_cache_misses += int(not cached)
+                if not cached:
+                    exact_search_seconds += time.perf_counter() - oracle_started
         except ValueError as error:
             skipped += 1
             if audit_mode:
@@ -799,7 +879,8 @@ def compare_seed(
     print(
         f"\nseed={exploration_seed} proven-contexts={proven} skipped={skipped} "
         f"wall={time.perf_counter() - started:.3f}s "
-        f"exact={exact_search_seconds / proven * 1e3:.2f}ms/context"
+        f"exact={exact_search_seconds / max(oracle_cache_misses, 1) * 1e3:.2f}ms/context "
+        f"oracle-cache={oracle_cache_hits} hit/{oracle_cache_misses} miss"
     )
     print("Search performance and miss diagnosis")
     print("  K | recall | bounded ms | speedup | missed base/beam")
@@ -807,9 +888,14 @@ def compare_seed(
         metrics = metrics_by_top_k[top_k]
         mean = lambda values: sum(values) / proven
         bounded_ms = bounded_search_seconds[top_k] / proven * 1e3
+        speedup = (
+            f"{exact_search_seconds / bounded_search_seconds[top_k]:.1f}x"
+            if exact_search_seconds
+            else "cached"
+        )
         print(
             f"{top_k:3d} | {mean(metrics['recall']):.3f}  | {bounded_ms:.2f}       "
-            f"| {exact_search_seconds / bounded_search_seconds[top_k]:.1f}x   "
+            f"| {speedup:<7} "
             f"| {mean(metrics['missed_base_pool_mass']):.3f}/{mean(metrics['missed_beam_mass']):.3f}"
         )
     print_distribution_table(
@@ -856,6 +942,11 @@ def main() -> None:
         activity_dur_path=files["activity_dur"],
     )
     search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
+    oracle_cache = None
+    if not args.no_oracle_cache:
+        fingerprint = oracle_input_fingerprint(files)
+        oracle_cache = OracleCache(fingerprint, args.oracle_depth, args.max_states)
+        print(f"Oracle cache: {oracle_cache.path}")
     profiles = context_profiles(steps)
     supported = profiles.filter(pl.col("layers") >= 2)
     short = supported.filter(pl.col("layers") <= args.max_layers)
@@ -895,6 +986,7 @@ def main() -> None:
             profiles,
             profile_by_context,
             population_by_stratum,
+            oracle_cache,
         )
 
 
