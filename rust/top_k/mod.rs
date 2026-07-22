@@ -33,6 +33,7 @@ pub(crate) enum CandidateStrategy {
     Heuristic,
     Surface,
     FactorMap,
+    SymmetricFactorMap,
 }
 
 impl CandidateStrategy {
@@ -41,8 +42,10 @@ impl CandidateStrategy {
             "heuristic" => Ok(Self::Heuristic),
             "surface" => Ok(Self::Surface),
             "factor_map" => Ok(Self::FactorMap),
+            "symmetric_factor_map" => Ok(Self::SymmetricFactorMap),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'surface', 'factor_map', or 'heuristic'".to_string(),
+                "candidate_strategy must be 'surface', 'factor_map', 'symmetric_factor_map', or 'heuristic'"
+                    .to_string(),
             )),
         }
     }
@@ -423,6 +426,200 @@ struct FactorMapRequest<'a> {
     candidate_limit: usize,
 }
 
+struct NextFactorMapRequest<'a> {
+    layer: usize,
+    domain: &'a [usize],
+    next_zone: usize,
+    next_next_zone: Option<usize>,
+}
+
+fn next_factor_map<'a>(
+    inputs: &SearchInputs<'_>,
+    request: NextFactorMapRequest<'_>,
+    cache: &'a mut HashMap<(usize, usize, Option<usize>), FactorScoreMap>,
+    hits: &mut u64,
+    builds: &mut u64,
+) -> &'a FactorScoreMap {
+    match cache.entry((request.layer + 1, request.next_zone, request.next_next_zone)) {
+        Entry::Occupied(entry) => {
+            *hits += 1;
+            entry.into_mut()
+        }
+        Entry::Vacant(entry) => {
+            *builds += 1;
+            entry.insert({
+                let next_outbound = request
+                    .next_next_zone
+                    .and_then(|zone| inputs.graph.edge_to(request.next_zone, zone));
+                let next_departure = next_outbound.and_then(|edge| {
+                    inputs
+                        .context
+                        .steps
+                        .get(request.layer + 2)
+                        .and_then(|step| {
+                            adjusted_times(*step, edge).map(|(departure, _)| departure)
+                        })
+                });
+                let mut map = FactorScoreMap {
+                    entries: Vec::with_capacity(request.domain.len()),
+                };
+                for (position, &destination) in request.domain.iter().enumerate() {
+                    let score = inputs
+                        .graph
+                        .edge_to(destination, request.next_zone)
+                        .and_then(|inbound| {
+                            let (_, arrival) =
+                                adjusted_times(inputs.context.steps[request.layer + 1], inbound)?;
+                            score_local_weight_from_times(
+                                inputs.scoring(),
+                                request.layer + 1,
+                                request.next_zone,
+                                inbound,
+                                arrival,
+                                next_departure,
+                            )
+                        });
+                    if let Some(score) = score {
+                        map.entries.push((position, score));
+                    }
+                }
+                map
+            })
+        }
+    }
+}
+
+struct ReverseFactorMapRequest<'a> {
+    layer: usize,
+    next_zone: usize,
+    next_next_zone: Option<usize>,
+    anchor_slot: Option<usize>,
+    anchors: &'a [Option<usize>],
+    candidate_limit: usize,
+}
+
+/// Known prefix utility components for a proposed reverse boundary. These are
+/// recomputed from the boundary anchor assignment, never stored as exact
+/// suffix utility: the first home leg and first-choice attractions are exact
+/// components, while durations and unknown inbound legs remain deferred.
+fn reverse_prefix_partial_score(
+    inputs: &SearchInputs<'_>,
+    layer: usize,
+    destination: usize,
+    anchors: &[Option<usize>],
+    candidate_slot: Option<usize>,
+) -> Option<f64> {
+    let known_destination = |known_layer: usize| {
+        if known_layer == layer {
+            return Some(destination);
+        }
+        inputs.context.steps[known_layer]
+            .anchor_id
+            .and_then(|anchor| inputs.anchor_slots.get(&anchor).copied())
+            .and_then(|slot| {
+                if candidate_slot == Some(slot) {
+                    Some(destination)
+                } else {
+                    anchors[slot]
+                }
+            })
+    };
+    let mut score = 0.0;
+    if let Some(first_destination) = known_destination(0) {
+        score += initial_endpoint_score(
+            inputs.graph,
+            inputs.destinations,
+            inputs.context,
+            first_destination,
+            inputs.parameters,
+        )?;
+    }
+    for known_layer in 1..=layer {
+        if !inputs.problem.is_first_choice(known_layer) {
+            continue;
+        }
+        let Some(known_destination) = known_destination(known_layer) else {
+            continue;
+        };
+        let step = inputs.context.steps[known_layer];
+        let value = fixed_destination_value(
+            inputs.destinations.activity(step.activity_id),
+            known_destination,
+        );
+        if !value.log_opportunity_capacity.is_finite() {
+            return None;
+        }
+        score += value.log_opportunity_capacity;
+    }
+    Some(score)
+}
+
+/// Rank a reverse extension by the exact factor already determined on its
+/// right. The score is proposal-only; retained suffix nodes continue to own
+/// and accumulate that exact factor through `LocalScoreCache`.
+fn reverse_factor_map_candidates(
+    inputs: &SearchInputs<'_>,
+    request: ReverseFactorMapRequest<'_>,
+    maps: &mut FactorMapCache,
+    ranked: &mut Vec<(f64, usize)>,
+) -> Result<Vec<usize>, SamplerError> {
+    if let Some(zone) = request.anchor_slot.and_then(|slot| request.anchors[slot]) {
+        return Ok(vec![zone]);
+    }
+    let step = inputs.context.steps[request.layer];
+    if let Some(fixed) = step.fixed_destination {
+        return Ok(vec![inputs.graph.zone_index[&fixed]]);
+    }
+    let domain =
+        inputs
+            .destinations
+            .domain(step.activity_id)
+            .ok_or(SamplerError::NoFeasibleSequence {
+                context_id: inputs.context.context_id,
+                origin: inputs.context.initial_zone,
+            })?;
+    let map = next_factor_map(
+        inputs,
+        NextFactorMapRequest {
+            layer: request.layer,
+            domain,
+            next_zone: request.next_zone,
+            next_next_zone: request.next_next_zone,
+        },
+        &mut maps.next,
+        &mut maps.next_hits,
+        &mut maps.next_builds,
+    );
+    ranked.clear();
+    ranked.extend(map.entries.iter().filter_map(|&(position, score)| {
+        let destination = domain[position];
+        reverse_prefix_partial_score(
+            inputs,
+            request.layer,
+            destination,
+            request.anchors,
+            request.anchor_slot,
+        )
+        .map(|partial| (score + partial, destination))
+    }));
+    let compare = |left: &(f64, usize), right: &(f64, usize)| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+    };
+    if ranked.len() > request.candidate_limit {
+        ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
+        ranked.truncate(request.candidate_limit);
+    }
+    let mut result = ranked
+        .iter()
+        .map(|&(_, destination)| destination)
+        .collect::<Vec<_>>();
+    result.sort_unstable();
+    Ok(result)
+}
+
 /// Build exact, destination-resolution utility maps for every activity factor
 /// affected by choosing a forward destination. Missing entries are infeasible;
 /// no sentinel values are introduced. This is an experimental alternative to
@@ -508,6 +705,10 @@ fn factor_map_candidates(
     let mut result = Vec::with_capacity(request.candidate_limit * request.suffixes.len());
     for &suffix_index in request.suffixes {
         let suffix = &suffix_nodes[suffix_index];
+        if let Some(assigned) = request.anchor_slot.and_then(|slot| suffix.anchors[slot]) {
+            result.push(assigned);
+            continue;
+        }
         let next_zone = suffix.zone;
         let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
         let current_map =
@@ -549,58 +750,18 @@ fn factor_map_candidates(
                     })
                 }
             };
-        let next_map = match maps
-            .next
-            .entry((request.layer + 1, next_zone, next_next_zone))
-        {
-            Entry::Occupied(entry) => {
-                maps.next_hits += 1;
-                entry.into_mut()
-            }
-            Entry::Vacant(entry) => {
-                maps.next_builds += 1;
-                entry.insert({
-                    let next_outbound =
-                        next_next_zone.and_then(|zone| inputs.graph.edge_to(next_zone, zone));
-                    let next_departure = next_outbound.and_then(|edge| {
-                        inputs
-                            .context
-                            .steps
-                            .get(request.layer + 2)
-                            .and_then(|step| {
-                                adjusted_times(*step, edge).map(|(departure, _)| departure)
-                            })
-                    });
-                    let mut map = FactorScoreMap {
-                        entries: Vec::with_capacity(domain.len()),
-                    };
-                    for (position, &destination) in domain.iter().enumerate() {
-                        let score =
-                            inputs
-                                .graph
-                                .edge_to(destination, next_zone)
-                                .and_then(|inbound| {
-                                    let (_, arrival) = adjusted_times(
-                                        inputs.context.steps[request.layer + 1],
-                                        inbound,
-                                    )?;
-                                    score_local_weight_from_times(
-                                        inputs.scoring(),
-                                        request.layer + 1,
-                                        next_zone,
-                                        inbound,
-                                        arrival,
-                                        next_departure,
-                                    )
-                                });
-                        if let Some(score) = score {
-                            map.entries.push((position, score));
-                        }
-                    }
-                    map
-                })
-            }
-        };
+        let next_map = next_factor_map(
+            inputs,
+            NextFactorMapRequest {
+                layer: request.layer,
+                domain,
+                next_zone,
+                next_next_zone,
+            },
+            &mut maps.next,
+            &mut maps.next_hits,
+            &mut maps.next_builds,
+        );
         ranked.clear();
         let mut current_index = 0;
         let mut next_index = 0;
@@ -741,7 +902,13 @@ fn forward_beam(
                     }
                     result
                 }
-                (CandidateStrategy::FactorMap, Some(_)) if unassigned => {
+                (strategy, Some(_))
+                    if unassigned
+                        && matches!(
+                            strategy,
+                            CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
+                        ) =>
+                {
                     let map_started = profile.then(Instant::now);
                     let factor_suffixes = if backward.frontiers[layer + 1].is_empty() {
                         guidance_suffixes
@@ -1125,9 +1292,13 @@ fn backward_beam(
     let context = inputs.context;
     let beam_width = inputs.options.frontier_width;
     let candidate_count = inputs.options.proposal_limit_per_source;
+    let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
+    let reverse_map_state_limit = inputs.options.continuation_state_limit.max(4);
     let anchor_slots = &inputs.anchor_slots;
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
+    let factor_map_cache = &mut scratch.factor_map_cache;
+    let factor_map_ranked = &mut scratch.factor_map_ranked;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
     let candidate_inputs = CandidateInputs {
@@ -1162,6 +1333,9 @@ fn backward_beam(
         let mut scores = Vec::new();
         let mut pairs = Vec::new();
         for (state_index, &next_index) in frontier.iter().enumerate() {
+            if symmetric && state_index >= reverse_map_state_limit {
+                break;
+            }
             let next = &nodes[next_index];
             let next_zone = next.zone;
             let query = CandidateQuery {
@@ -1175,7 +1349,37 @@ fn backward_beam(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| nodes[index].zone);
-            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
+            let reverse_candidates = if symmetric {
+                let map_started = profile.then(Instant::now);
+                if context.steps[layer].fixed_destination.is_none()
+                    && query
+                        .anchor_slot
+                        .is_none_or(|slot| query.anchors[slot].is_none())
+                {
+                    report.factor_map_destination_evaluations += destinations
+                        .domain(context.steps[layer].activity_id)
+                        .map_or(0, |domain| domain.len() as u64);
+                }
+                let result = reverse_factor_map_candidates(
+                    inputs,
+                    ReverseFactorMapRequest {
+                        layer,
+                        next_zone,
+                        next_next_zone,
+                        anchor_slot: query.anchor_slot,
+                        anchors: query.anchors,
+                        candidate_limit: candidate_count.saturating_mul(2),
+                    },
+                    factor_map_cache,
+                    factor_map_ranked,
+                )?;
+                if let Some(started) = map_started {
+                    report.factor_map_ns += started.elapsed().as_nanos() as u64;
+                }
+                result
+            } else {
+                candidates(candidate_inputs, query, candidate_cache)?
+            };
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -1186,9 +1390,23 @@ fn backward_beam(
                     next_next_zone,
                 );
                 if let Some(score) = score {
+                    let partial = if symmetric {
+                        let Some(partial) = reverse_prefix_partial_score(
+                            inputs,
+                            layer,
+                            candidate,
+                            query.anchors,
+                            query.anchor_slot,
+                        ) else {
+                            continue;
+                        };
+                        partial
+                    } else {
+                        0.0
+                    };
                     children.push((next_index, candidate, score));
                     pairs.push((candidate, next_zone));
-                    scores.push(next.exact_log_weight + score);
+                    scores.push(next.exact_log_weight + score + partial);
                 }
             }
         }
@@ -1248,7 +1466,11 @@ fn extend_backward_guidance(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let guidance_width = if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
+    let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
+    let guidance_width = if matches!(
+        inputs.options.candidate_strategy,
+        CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
+    ) {
         inputs.options.continuation_state_limit.max(4)
     } else {
         inputs.options.continuation_state_limit
@@ -1257,6 +1479,8 @@ fn extend_backward_guidance(
     let anchor_slots = &inputs.anchor_slots;
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
+    let factor_map_cache = &mut scratch.factor_map_cache;
+    let factor_map_ranked = &mut scratch.factor_map_ranked;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
     let candidate_inputs = CandidateInputs {
@@ -1293,7 +1517,37 @@ fn extend_backward_guidance(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
-            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
+            let reverse_candidates = if symmetric {
+                let map_started = profile.then(Instant::now);
+                if context.steps[layer].fixed_destination.is_none()
+                    && query
+                        .anchor_slot
+                        .is_none_or(|slot| query.anchors[slot].is_none())
+                {
+                    report.factor_map_destination_evaluations += destinations
+                        .domain(context.steps[layer].activity_id)
+                        .map_or(0, |domain| domain.len() as u64);
+                }
+                let result = reverse_factor_map_candidates(
+                    inputs,
+                    ReverseFactorMapRequest {
+                        layer,
+                        next_zone,
+                        next_next_zone,
+                        anchor_slot: query.anchor_slot,
+                        anchors: query.anchors,
+                        candidate_limit: candidate_count.saturating_mul(2),
+                    },
+                    factor_map_cache,
+                    factor_map_ranked,
+                )?;
+                if let Some(started) = map_started {
+                    report.factor_map_ns += started.elapsed().as_nanos() as u64;
+                }
+                result
+            } else {
+                candidates(candidate_inputs, query, candidate_cache)?
+            };
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -1304,9 +1558,23 @@ fn extend_backward_guidance(
                     next_next_zone,
                 );
                 if let Some(score) = score {
+                    let partial = if symmetric {
+                        let Some(partial) = reverse_prefix_partial_score(
+                            inputs,
+                            layer,
+                            candidate,
+                            query.anchors,
+                            query.anchor_slot,
+                        ) else {
+                            continue;
+                        };
+                        partial
+                    } else {
+                        0.0
+                    };
                     children.push((next_index, candidate, score));
                     pairs.push((candidate, next_zone));
-                    scores.push(next.exact_log_weight + score);
+                    scores.push(next.exact_log_weight + score + partial);
                 }
             }
         }
@@ -1499,7 +1767,9 @@ fn search_context(
     let problem = build_scoring_problem(context)?;
     let use_heuristic = match options.candidate_strategy {
         CandidateStrategy::Surface => context.steps.len() > 4,
-        CandidateStrategy::FactorMap => context.steps.len() > options.factor_map_max_depth,
+        CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap => {
+            context.steps.len() > options.factor_map_max_depth
+        }
         CandidateStrategy::Heuristic => false,
     };
     let options = if use_heuristic {
