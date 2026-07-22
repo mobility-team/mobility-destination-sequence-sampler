@@ -524,6 +524,9 @@ fn reverse_prefix_partial_score(
         if known_layer == layer {
             return Some(destination);
         }
+        if let Some(fixed) = inputs.context.steps[known_layer].fixed_destination {
+            return inputs.graph.zone_index.get(&fixed).copied();
+        }
         inputs.context.steps[known_layer]
             .anchor_id
             .and_then(|anchor| inputs.anchor_slots.get(&anchor).copied())
@@ -536,17 +539,53 @@ fn reverse_prefix_partial_score(
             })
     };
     let mut score = 0.0;
-    if let Some(first_destination) = known_destination(0) {
-        score += initial_endpoint_score(
-            inputs.graph,
-            inputs.destinations,
-            inputs.context,
-            first_destination,
-            inputs.parameters,
+    let mut exactly_scored = vec![false; layer + 1];
+    for (factor_layer, exactly_scored) in exactly_scored.iter_mut().enumerate() {
+        let Some(factor_destination) = known_destination(factor_layer) else {
+            continue;
+        };
+        let factor_origin = if factor_layer == 0 {
+            inputs.graph.zone_index[&inputs.context.initial_zone]
+        } else {
+            let Some(origin) = known_destination(factor_layer - 1) else {
+                continue;
+            };
+            origin
+        };
+        let terminal_fixed = factor_layer + 1 == inputs.context.steps.len()
+            && inputs.context.steps[factor_layer]
+                .fixed_destination
+                .is_some();
+        let next_destination = if terminal_fixed {
+            None
+        } else {
+            let Some(next) = known_destination(factor_layer + 1) else {
+                continue;
+            };
+            Some(next)
+        };
+        score += score_local_weight(
+            inputs.scoring(),
+            factor_layer,
+            factor_origin,
+            factor_destination,
+            next_destination,
         )?;
+        *exactly_scored = true;
     }
-    for known_layer in 1..=layer {
-        if !inputs.problem.is_first_choice(known_layer) {
+    if !exactly_scored[0] {
+        if let Some(first_destination) = known_destination(0) {
+            score += initial_endpoint_score(
+                inputs.graph,
+                inputs.destinations,
+                inputs.context,
+                first_destination,
+                inputs.parameters,
+            )?;
+        }
+    }
+    for (known_layer, &exactly_scored) in exactly_scored.iter().enumerate().skip(1) {
+        if exactly_scored || !inputs.problem.is_first_choice(known_layer) {
             continue;
         }
         let Some(known_destination) = known_destination(known_layer) else {
