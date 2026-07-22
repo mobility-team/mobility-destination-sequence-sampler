@@ -78,6 +78,10 @@ struct BackwardMessages {
     /// Independent right-to-left partial messages used only by the symmetric
     /// proposal channel. Exact suffix ownership remains in `nodes`.
     partial_frontiers: Vec<Vec<usize>>,
+    /// Feasible reverse proposals for repeated anchors. These compact
+    /// assignments preserve destination diversity without retaining a full
+    /// suffix state for every anchor alternative.
+    partial_anchor_candidates: Vec<Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -199,6 +203,7 @@ pub struct TopKOptions {
     pub result_limit: u32,
     pub frontier_width: usize,
     pub proposal_limit_per_source: usize,
+    pub symmetric_message_limit: usize,
     pub symmetric_state_limit: usize,
     pub symmetric_forward_proposal_limit: usize,
     pub candidate_strategy: CandidateStrategy,
@@ -225,6 +230,7 @@ struct SearchInputs<'a> {
     parameters: Parameters,
     options: TopKOptions,
     anchor_slots: HashMap<u32, usize>,
+    repeated_anchor_slots: Vec<bool>,
 }
 
 impl SearchInputs<'_> {
@@ -880,6 +886,7 @@ fn forward_beam(
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
     let factor_map_guidance_limit = continuation_state_limit.max(4);
     let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
+    let symmetric_message_limit = inputs.options.symmetric_message_limit;
     let symmetric_state_limit = inputs.options.symmetric_state_limit;
     let partial_beam_reserve = symmetric_state_limit.min(beam_width);
     let profile = inputs.options.profile;
@@ -1004,9 +1011,17 @@ fn forward_beam(
                 }
                 _ => candidates(candidate_inputs, query, candidate_cache)?,
             };
+            if symmetric && unassigned {
+                if let Some(slot) = candidate_slot {
+                    if inputs.repeated_anchor_slots[slot] {
+                        candidate_zones
+                            .extend_from_slice(&backward.partial_anchor_candidates[slot]);
+                    }
+                }
+            }
             if symmetric
                 && unassigned
-                && symmetric_state_limit > 0
+                && symmetric_message_limit > 0
                 && inputs.options.symmetric_forward_proposal_limit > 0
             {
                 let partial_suffixes = backward
@@ -1014,7 +1029,7 @@ fn forward_beam(
                     .get(layer + 1)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let map_count = partial_suffixes.len().min(symmetric_state_limit);
+                let map_count = partial_suffixes.len().min(symmetric_message_limit);
                 if map_count > 0 {
                     let map_started = profile.then(Instant::now);
                     if context.steps[layer].fixed_destination.is_none() {
@@ -1122,7 +1137,7 @@ fn forward_beam(
                         backward
                             .partial_frontiers
                             .get(layer + 1)
-                            .filter(|frontier| symmetric_state_limit > 0 && !frontier.is_empty())
+                            .filter(|frontier| symmetric_message_limit > 0 && !frontier.is_empty())
                             .and_then(|suffix_frontier| {
                                 best_continuation_score(
                                     inputs,
@@ -1135,7 +1150,7 @@ fn forward_beam(
                                     },
                                     &backward.nodes,
                                     &suffix_frontier
-                                        [..suffix_frontier.len().min(symmetric_state_limit)],
+                                        [..suffix_frontier.len().min(symmetric_message_limit)],
                                     local_scores,
                                 )
                             })
@@ -1549,6 +1564,7 @@ fn backward_beam(
         frontiers,
         guidance_frontiers: vec![Vec::new(); context.steps.len()],
         partial_frontiers: vec![Vec::new(); context.steps.len()],
+        partial_anchor_candidates: vec![Vec::new(); anchor_slots.len()],
     })
 }
 
@@ -1563,7 +1579,7 @@ fn extend_backward_guidance(
     let destinations = inputs.destinations;
     let context = inputs.context;
     let guidance_width = match mode {
-        BackwardGuidanceMode::Partial => inputs.options.symmetric_state_limit,
+        BackwardGuidanceMode::Partial => inputs.options.symmetric_message_limit,
         BackwardGuidanceMode::Exact
             if matches!(
                 inputs.options.candidate_strategy,
@@ -1606,6 +1622,11 @@ fn extend_backward_guidance(
         }
     }
     for layer in (0..=stitch_layer).rev() {
+        let layer_width = if mode == BackwardGuidanceMode::Partial && layer < stitch_layer {
+            inputs.options.symmetric_state_limit
+        } else {
+            guidance_width
+        };
         let mut children = Vec::new();
         let mut scores = Vec::new();
         let mut pairs = Vec::new();
@@ -1688,10 +1709,29 @@ fn extend_backward_guidance(
             frontier.clear();
             break;
         }
+        if mode == BackwardGuidanceMode::Partial {
+            if let Some(anchor) = context.steps[layer].anchor_id {
+                let slot = anchor_slots[&anchor];
+                if inputs.repeated_anchor_slots[slot] {
+                    let compact = &mut messages.partial_anchor_candidates[slot];
+                    for index in select_beam_indices(
+                        &scores,
+                        inputs.options.symmetric_forward_proposal_limit,
+                    ) {
+                        let (next_index, destination, _) = children[index];
+                        if messages.nodes[next_index].anchors[slot].is_none()
+                            && !compact.contains(&destination)
+                        {
+                            compact.push(destination);
+                        }
+                    }
+                }
+            }
+        }
         let retained = retain_pair_alternatives(
             &scores,
             &pairs,
-            (inputs.options.result_limit as usize).min(guidance_width),
+            (inputs.options.result_limit as usize).min(layer_width),
         );
         let children = retained
             .iter()
@@ -1701,7 +1741,7 @@ fn extend_backward_guidance(
             .iter()
             .map(|&index| scores[index])
             .collect::<Vec<_>>();
-        frontier = select_beam_indices(&scores, guidance_width)
+        frontier = select_beam_indices(&scores, layer_width)
             .into_iter()
             .map(|index| {
                 let (next_index, destination, exact_increment) = children[index];
@@ -1889,6 +1929,14 @@ fn search_context(
     } else {
         options
     };
+    let anchor_slots = anchor_slots(context);
+    let mut anchor_counts = vec![0_u32; anchor_slots.len()];
+    for step in &context.steps {
+        if let Some(anchor) = step.anchor_id {
+            anchor_counts[anchor_slots[&anchor]] += 1;
+        }
+    }
+    let repeated_anchor_slots = anchor_counts.into_iter().map(|count| count > 1).collect();
     let inputs = SearchInputs {
         graph,
         destinations,
@@ -1896,7 +1944,8 @@ fn search_context(
         problem,
         parameters,
         options,
-        anchor_slots: anchor_slots(context),
+        anchor_slots,
+        repeated_anchor_slots,
     };
     let mut scratch = SearchScratch::new();
     if let Some(started) = build_started {
@@ -1922,7 +1971,7 @@ fn search_context(
         BackwardGuidanceMode::Exact,
     )?;
     if inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap
-        && inputs.options.symmetric_state_limit > 0
+        && inputs.options.symmetric_message_limit > 0
     {
         extend_backward_guidance(
             &inputs,
