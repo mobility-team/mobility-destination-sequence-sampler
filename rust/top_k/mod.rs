@@ -199,6 +199,8 @@ pub struct TopKOptions {
     pub result_limit: u32,
     pub frontier_width: usize,
     pub proposal_limit_per_source: usize,
+    pub symmetric_state_limit: usize,
+    pub symmetric_forward_proposal_limit: usize,
     pub candidate_strategy: CandidateStrategy,
     pub surface_bins: usize,
     pub factor_map_max_depth: usize,
@@ -839,7 +841,8 @@ fn forward_beam(
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
     let factor_map_guidance_limit = continuation_state_limit.max(4);
     let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
-    let partial_beam_reserve = beam_width.div_ceil(10).max(1);
+    let symmetric_state_limit = inputs.options.symmetric_state_limit;
+    let partial_beam_reserve = symmetric_state_limit.min(beam_width);
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let factor_map_cache = &mut scratch.factor_map_cache;
@@ -962,13 +965,17 @@ fn forward_beam(
                 }
                 _ => candidates(candidate_inputs, query, candidate_cache)?,
             };
-            if symmetric && unassigned {
+            if symmetric
+                && unassigned
+                && symmetric_state_limit > 0
+                && inputs.options.symmetric_forward_proposal_limit > 0
+            {
                 let partial_suffixes = backward
                     .partial_frontiers
                     .get(layer + 1)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                let map_count = partial_suffixes.len().min(factor_map_guidance_limit);
+                let map_count = partial_suffixes.len().min(symmetric_state_limit);
                 if map_count > 0 {
                     let map_started = profile.then(Instant::now);
                     if context.steps[layer].fixed_destination.is_none() {
@@ -976,7 +983,10 @@ fn forward_beam(
                             .domain(context.steps[layer].activity_id)
                             .map_or(0, |domain| domain.len() as u64 * map_count as u64);
                     }
-                    let per_map_limit = candidate_count.div_ceil(map_count);
+                    let per_map_limit = inputs
+                        .options
+                        .symmetric_forward_proposal_limit
+                        .div_ceil(map_count);
                     candidate_zones.extend(factor_map_candidates(
                         inputs,
                         FactorMapRequest {
@@ -1073,7 +1083,7 @@ fn forward_beam(
                         backward
                             .partial_frontiers
                             .get(layer + 1)
-                            .filter(|frontier| continuation_state_limit > 0 && !frontier.is_empty())
+                            .filter(|frontier| symmetric_state_limit > 0 && !frontier.is_empty())
                             .and_then(|suffix_frontier| {
                                 best_continuation_score(
                                     inputs,
@@ -1086,7 +1096,7 @@ fn forward_beam(
                                     },
                                     &backward.nodes,
                                     &suffix_frontier
-                                        [..suffix_frontier.len().min(continuation_state_limit)],
+                                        [..suffix_frontier.len().min(symmetric_state_limit)],
                                     local_scores,
                                 )
                             })
@@ -1118,7 +1128,7 @@ fn forward_beam(
             &pairs,
             (inputs.options.result_limit as usize).min(beam_width),
         );
-        if symmetric {
+        if symmetric && partial_beam_reserve > 0 {
             for index in retain_pair_alternatives(
                 &partial_scores,
                 &pairs,
@@ -1142,7 +1152,7 @@ fn forward_beam(
             .map(|&index| partial_scores[index])
             .collect::<Vec<_>>();
         let mut selected = select_beam_indices(&scores, beam_width);
-        if symmetric {
+        if symmetric && partial_beam_reserve > 0 {
             for index in select_beam_indices(&partial_scores, partial_beam_reserve) {
                 if !selected.contains(&index) {
                     selected.push(index);
@@ -1513,13 +1523,17 @@ fn extend_backward_guidance(
     let graph = inputs.graph;
     let destinations = inputs.destinations;
     let context = inputs.context;
-    let guidance_width = if matches!(
-        inputs.options.candidate_strategy,
-        CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
-    ) {
-        inputs.options.continuation_state_limit.max(4)
-    } else {
-        inputs.options.continuation_state_limit
+    let guidance_width = match mode {
+        BackwardGuidanceMode::Partial => inputs.options.symmetric_state_limit,
+        BackwardGuidanceMode::Exact
+            if matches!(
+                inputs.options.candidate_strategy,
+                CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
+            ) =>
+        {
+            inputs.options.continuation_state_limit.max(4)
+        }
+        BackwardGuidanceMode::Exact => inputs.options.continuation_state_limit,
     };
     let candidate_count = inputs.options.proposal_limit_per_source;
     let anchor_slots = &inputs.anchor_slots;
@@ -1868,7 +1882,9 @@ fn search_context(
         &mut backward,
         BackwardGuidanceMode::Exact,
     )?;
-    if inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap {
+    if inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap
+        && inputs.options.symmetric_state_limit > 0
+    {
         extend_backward_guidance(
             &inputs,
             &mut scratch,

@@ -1,6 +1,6 @@
 # Current benchmarks
 
-Release build, Windows, Grand Geneve iteration-5 cache, 2026-07-21. These are
+Release build, Windows, Grand Geneve iteration-5 cache, 2026-07-22. These are
 kernel measurements, not end-to-end Mobility timings.
 
 ## Active bounded top-K
@@ -12,16 +12,16 @@ zones), eight threads; `frontier_width=40`, `proposal_limit_per_source=16`,
 
 | Policy | Wall time | Complete | Infeasible |
 |---|---:|---:|---:|
-| Factor map, depth <=5 (default) | 14.56 s | 70,320 | 11,524 |
+| Symmetric factor map, depth <=5 (default) | 25.46 s | 70,733 | 11,111 |
+| Asymmetric factor map | 16.30 s | 70,335 | 11,509 |
 | Binned surface comparator | 8.785 s | 70,143 | 11,701 |
 | Heuristic comparator | 6.591 s | 70,351 | 11,493 |
 
-The default remains comfortably within the 30-second target. A five-per-stratum
-audit (69 oracle-proven contexts; 99.4% population coverage) estimates
-`Mass@10` at 0.784 (width 32: 0.772; surface 0.735; heuristic 0.707).
-On the identical 69 contexts, the centred stitch scores 0.759.
-An independent seed-43, three-per-stratum cohort estimates 0.774 over 36
-oracle-proven contexts (91.5% coverage).
+The default remains within the 30-second target. Across five deterministic
+50-context exact cohorts, symmetric versus asymmetric factor maps improve mean
+`Mass@10` from 0.703 to 0.803 and `Recall@10` from 0.684 to 0.780. Bounded
+search rises from 2.38 to 3.91 ms/context. Exact-oracle results are cached by
+immutable-input/scorer fingerprint.
 Older throughput and
 quality measurements are experiment history, not the active baseline.
 

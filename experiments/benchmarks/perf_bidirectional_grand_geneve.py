@@ -40,10 +40,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--frontier-width", type=int, default=40)
     parser.add_argument("--proposal-limit-per-source", type=int, default=16)
+    parser.add_argument("--symmetric-state-limit", type=int, default=4)
+    parser.add_argument("--symmetric-forward-proposal-limit", type=int, default=16)
     parser.add_argument(
         "--candidate-strategy",
         choices=("surface", "factor_map", "symmetric_factor_map", "heuristic"),
-        default="factor_map",
+        default="symmetric_factor_map",
     )
     parser.add_argument("--surface-bins", type=int, choices=(2, 4), default=2)
     parser.add_argument("--factor-map-max-depth", type=int, default=5)
@@ -126,6 +128,8 @@ def main() -> None:
         exploration_seed=args.exploration_seed,
         frontier_width=args.frontier_width,
         proposal_limit_per_source=args.proposal_limit_per_source,
+        symmetric_state_limit=args.symmetric_state_limit,
+        symmetric_forward_proposal_limit=args.symmetric_forward_proposal_limit,
         candidate_strategy=args.candidate_strategy,
         surface_bins=args.surface_bins,
         factor_map_max_depth=args.factor_map_max_depth,
@@ -148,6 +152,8 @@ def main() -> None:
         f"frontier-width={args.frontier_width} "
         f"stitch-bias={args.stitch_bias} "
         f"proposal-limit={args.proposal_limit_per_source} "
+        f"symmetric-state-limit={args.symmetric_state_limit} "
+        f"symmetric-forward-proposal-limit={args.symmetric_forward_proposal_limit} "
         f"candidate-strategy={args.candidate_strategy} "
         f"surface-bins={args.surface_bins} "
         f"factor-map-max-depth={args.factor_map_max_depth} "

@@ -1,28 +1,27 @@
-# Active: unbinned factor-map top-K
+# Active: symmetric unbinned factor-map top-K
 
-`top_k()` defaults to `candidate_strategy="factor_map"` with
-`stitch_bias=1`. It grows bounded
-bidirectional frontiers, exact-scores retained plans, and stitches them
-exactly. Depth 2 is a direct scan; factor maps apply through depth 5; longer
-plans use the cheap heuristic.
+`top_k()` defaults to `candidate_strategy="symmetric_factor_map"`,
+`symmetric_state_limit=4`, `symmetric_forward_proposal_limit=16`, and
+`stitch_bias=1`.
+Depth 2 is a direct scan; factor maps apply through depth 5; longer plans use
+the heuristic.
 
-For each forward candidate destination, the proposal path builds three exact
-destination maps for the affected previous, current, and next activity
-factors. Missing entries are infeasible. Their support is intersected and the
-sum is partial-top-K selected without bins. Four propagated backward suffix
-hypotheses each contribute part of the 32-candidate budget; maps with the same
-fixed neighbours are cached per context.
+The primary backward channel retains exact suffix utility. An independent
+four-state reverse channel combines the exact known right factor with known
+prefix endpoint/attraction terms. Forward search preserves its primary beam,
+unions 16 candidates from the partial channel, and may retain four extra
+partial-ranked states. Partial scores guide search only; completed plans are
+ranked by the exact shared scorer. Sparse factor maps omit infeasible cells and
+are cached by fixed neighbours.
 
-## Evidence (Grand Geneve, 2026-07-21)
+## Evidence (Grand Geneve, 2026-07-22)
 
-- Global five-per-stratum audit: weighted `Mass@10` 0.784 at width 40,
-  versus 0.772 at width 32, centred factor-map 0.759, surface 0.735, and
-  heuristic 0.707. It has 69 proven contexts (99.4% coverage); an independent
-  seed-43 three-per-stratum cohort gives 0.774 over 36 (91.5%).
-- Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones,
-  eight threads: factor-map depth 5 14.56 s, 70,320 complete; inside 30 s.
+- Five deterministic 50-context cohorts: mean `Mass@10` 0.803 and
+  `Recall@10` 0.780, versus 0.703/0.684 for the asymmetric factor-map channel.
+- Full prepared workload: 81,844 contexts, 328,197 steps, 1,110 zones, eight
+  threads: 25.46 s, 70,733 complete; inside the 30-second target.
 
-Rejected: one suffix collapses geographically (0.488 pilot); eight suffixes
-split the fixed candidate budget (0.745); 32 proposals per source add beam
-loss (0.698); depth 6 loses long-chain continuation quality (0.706). The
-binned 2x2x2 surface remains the fast comparator (8.785 s, `Mass@10` 0.735).
+Tuning: zero auxiliary proposals loses the gain; eight proposals reduce the
+full workload to 20.06 s but lower five-seed mean `Mass@10` to 0.787. Eight
+states add little recall for ~48% more bounded-search time. Defaults are the
+measured quality/runtime knee.
