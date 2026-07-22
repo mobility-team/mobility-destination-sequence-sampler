@@ -1,4 +1,4 @@
-//! Minimal bounded bidirectional top-K search.
+//! Bounded bidirectional top-K search.
 //!
 //! This is intentionally a bounded stitch-layer beam search, not the previous all-zone
 //! bidirectional DP. It uses bounded candidate lists and beam frontiers in
@@ -1712,7 +1712,9 @@ fn extend_backward_guidance(
         if mode == BackwardGuidanceMode::Partial {
             if let Some(anchor) = context.steps[layer].anchor_id {
                 let slot = anchor_slots[&anchor];
-                if inputs.repeated_anchor_slots[slot] {
+                if inputs.repeated_anchor_slots[slot]
+                    && inputs.options.symmetric_forward_proposal_limit > 0
+                {
                     let compact = &mut messages.partial_anchor_candidates[slot];
                     for index in select_beam_indices(
                         &scores,

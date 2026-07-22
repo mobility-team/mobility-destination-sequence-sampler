@@ -8,7 +8,11 @@ install:
     mamba run -n mobility-destination-sequence-sampler python -m pip install -e .; exit $LASTEXITCODE
 
 build-release:
-    mamba run -n mobility-destination-sequence-sampler python -m maturin develop --release; exit $LASTEXITCODE
+    @cargo build --release --features pyo3/extension-module; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Copy-Item -LiteralPath target\release\mobility_destination_sequence_sampler.dll -Destination src\mobility_destination_sequence_sampler\_core.pyd -Force
+
+# Build an optimized extension quickly; timings are not production benchmarks.
+build-fast:
+    @cargo build --profile experiment --features pyo3/extension-module; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Copy-Item -LiteralPath target\experiment\mobility_destination_sequence_sampler.dll -Destination src\mobility_destination_sequence_sampler\_core.pyd -Force
 
 test:
     mamba run -n mobility-destination-sequence-sampler python -m pytest; exit $LASTEXITCODE
@@ -35,3 +39,11 @@ compare-refresh: build-release
 
 benchmark-throughput: build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_bidirectional_grand_geneve --contexts 1000 --threads 8 --profile; exit $LASTEXITCODE
+
+# Compare the main symmetric quality/runtime knobs in one prepared process.
+sweep-symmetric: build-fast
+    @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --contexts 50 --candidate-contexts 300 --top-k 10 --oracle-depth 100 --max-states 2000000 --compact --symmetric-config p8:4:4:8 --symmetric-config p12:4:4:12 --symmetric-config p16:4:4:16 --symmetric-config m8:8:4:8; exit $LASTEXITCODE
+
+# Run the fixed difficult/regression contexts with cached exact oracles.
+canary-quality: build-fast
+    @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --top-k 10 --oracle-depth 100 --max-states 2000000 --compact --context-id 26 --context-id 45331 --context-id 3647 --context-id 2679 --context-id 61440 --context-id 3506 --context-id 57725 --context-id 61662; exit $LASTEXITCODE

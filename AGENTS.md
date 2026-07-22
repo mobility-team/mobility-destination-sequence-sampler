@@ -9,6 +9,7 @@ Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 
 - `just install` — editable Python package.
 - `just build-release` — release PyO3 extension.
+- `just build-fast` — optimized non-LTO extension for quality iteration; do not benchmark it.
 - `just test` — Python tests (after a build).
 - `just check` — format, Clippy, then tests.
 - `just compare-quality` — 50-context bounded-versus-exact default comparison.
@@ -17,6 +18,8 @@ Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 - `just audit-global-quality [per_stratum] [max_states]` — all-depth weighted oracle-audit pilot; failures remain visible.
 - `just compare-refresh` — 0/1/2/4 refresh quality trade-off.
 - `just benchmark-throughput` — 1,000-context eight-thread runtime profile.
+- `just canary-quality` — fixed hard/regression cases in one prepared process.
+- `just sweep-symmetric` — compact in-process symmetric parameter sweep.
 
 Use `rg` for files/text; use `ast-grep` for syntax-aware Rust/Python search or
 mechanical refactors.

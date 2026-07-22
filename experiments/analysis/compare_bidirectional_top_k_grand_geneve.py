@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symmetric-state-limit", type=int, default=4)
     parser.add_argument("--symmetric-forward-proposal-limit", type=int, default=8)
     parser.add_argument(
+        "--symmetric-config",
+        action="append",
+        metavar="LABEL:MESSAGES:STATES:PROPOSALS",
+        help="repeat to compare symmetric configurations in one prepared process",
+    )
+    parser.add_argument(
         "--candidate-strategy",
         choices=("surface", "factor_map", "symmetric_factor_map", "heuristic"),
         default="symmetric_factor_map",
@@ -84,6 +90,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--continuation-proposal-limit", type=int, default=1)
     parser.add_argument("--seam-refresh-per-prefix", type=int, default=1)
     parser.add_argument("--archetype-strata-limit", type=int, default=12)
+    parser.add_argument(
+        "--context-id",
+        type=int,
+        action="append",
+        dest="context_ids",
+        help="repeat to run a fixed diagnostic context set",
+    )
     parser.add_argument(
         "--trace-context",
         type=int,
@@ -107,7 +120,39 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="recompute exact cases instead of reusing fingerprinted oracle results",
     )
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="print one summary row per seed/configuration instead of distributions",
+    )
     return parser.parse_args()
+
+
+def symmetric_configurations(args: argparse.Namespace) -> list[tuple[str, int, int, int]]:
+    if not args.symmetric_config:
+        return [
+            (
+                "default",
+                args.symmetric_message_limit,
+                args.symmetric_state_limit,
+                args.symmetric_forward_proposal_limit,
+            )
+        ]
+    configurations = []
+    for value in args.symmetric_config:
+        parts = value.split(":")
+        if len(parts) != 4 or not parts[0]:
+            raise ValueError(
+                "--symmetric-config must be LABEL:MESSAGES:STATES:PROPOSALS"
+            )
+        try:
+            limits = tuple(int(part) for part in parts[1:])
+        except ValueError as error:
+            raise ValueError("symmetric configuration limits must be integers") from error
+        if min(limits) < 0:
+            raise ValueError("symmetric configuration limits must be non-negative")
+        configurations.append((parts[0], *limits))
+    return configurations
 
 
 ORACLE_CACHE_VERSION = 1
@@ -179,6 +224,15 @@ def eligible_context_ids(
         raise ValueError("--contexts and --candidate-contexts must be positive")
     if args.max_layers < 2:
         raise ValueError("--max-layers must be at least two")
+    if args.context_ids:
+        missing = [
+            context_id
+            for context_id in args.context_ids
+            if profiles.filter(pl.col("context_id") == context_id).is_empty()
+        ]
+        if missing:
+            raise ValueError(f"contexts do not exist: {missing}")
+        return list(dict.fromkeys(args.context_ids))
     if args.trace_context is not None:
         if profiles.filter(pl.col("context_id") == args.trace_context).is_empty():
             raise ValueError(f"context {args.trace_context} does not exist")
@@ -693,6 +747,7 @@ def show_context(
 
 def compare_seed(
     args: argparse.Namespace,
+    configuration_label: str,
     top_ks: list[int],
     exploration_seed: int,
     search: DestinationPlanSearch,
@@ -704,6 +759,7 @@ def compare_seed(
     profile_by_context: dict[int, tuple[int, int, int, str]],
     population_by_stratum: dict[str, int],
     oracle_cache: OracleCache | None,
+    oracle_memory: dict[int, tuple[pl.DataFrame, dict]],
 ) -> None:
     proven = 0
     skipped = 0
@@ -759,7 +815,10 @@ def compare_seed(
                 n_threads=1,
                 skip_infeasible=False,
             )
-            if oracle_cache is None:
+            if context_id in oracle_memory:
+                oracle_table, oracle_report = oracle_memory[context_id]
+                oracle_cache_hits += 1
+            elif oracle_cache is None:
                 oracle_table, oracle_report = compute_oracle()
                 oracle_cache_misses += 1
                 exact_search_seconds += time.perf_counter() - oracle_started
@@ -771,6 +830,7 @@ def compare_seed(
                 oracle_cache_misses += int(not cached)
                 if not cached:
                     exact_search_seconds += time.perf_counter() - oracle_started
+            oracle_memory[context_id] = (oracle_table, oracle_report)
         except ValueError as error:
             skipped += 1
             if audit_mode:
@@ -870,6 +930,12 @@ def compare_seed(
                 audit_metrics[top_k].setdefault(audit_stratum, {})
                 for name, value in metrics.items():
                     audit_metrics[top_k][audit_stratum].setdefault(name, []).append(value)
+            if args.compact and args.context_ids:
+                print(
+                    f"case | {context_id} | {configuration_label} | {exploration_seed} | "
+                    f"{top_k} | {metrics['recall']:.3f} | "
+                    f"{metrics['retained_top_k_mass']:.3f}"
+                )
         proven += 1
         if audit_mode:
             audit_outcomes[audit_stratum]["proven"] += 1
@@ -882,9 +948,28 @@ def compare_seed(
             print("No sampled context completed the exact top-K oracle.")
             return
         raise RuntimeError("no context completed the exact top-K oracle")
+    wall_seconds = time.perf_counter() - started
+    if args.compact:
+        if args.context_ids:
+            print(
+                "config | seed | K | n | recall | mass | min | zero | "
+                "bounded-ms | wall-s | oracle-hit/miss"
+            )
+        for top_k in top_ks:
+            metrics = metrics_by_top_k[top_k]
+            masses = metrics["retained_top_k_mass"]
+            print(
+                f"{configuration_label} | {exploration_seed} | {top_k} | {proven} | "
+                f"{sum(metrics['recall']) / proven:.3f} | "
+                f"{sum(masses) / proven:.3f} | {min(masses):.3f} | "
+                f"{sum(mass <= 0.0 for mass in masses)} | "
+                f"{bounded_search_seconds[top_k] / proven * 1e3:.2f} | "
+                f"{wall_seconds:.2f} | {oracle_cache_hits}/{oracle_cache_misses}"
+            )
+        return
     print(
         f"\nseed={exploration_seed} proven-contexts={proven} skipped={skipped} "
-        f"wall={time.perf_counter() - started:.3f}s "
+        f"wall={wall_seconds:.3f}s "
         f"exact={exact_search_seconds / max(oracle_cache_misses, 1) * 1e3:.2f}ms/context "
         f"oracle-cache={oracle_cache_hits} hit/{oracle_cache_misses} miss"
     )
@@ -979,21 +1064,43 @@ def main() -> None:
         stratum: int(population)
         for stratum, population in supported.group_by("audit_stratum").len().iter_rows()
     }
-    for exploration_seed in args.exploration_seeds or [42]:
-        compare_seed(
-            args,
-            top_ks,
-            exploration_seed,
-            search,
-            steps,
-            initial_locations,
-            od_costs,
-            destination_inputs,
-            profiles,
-            profile_by_context,
-            population_by_stratum,
-            oracle_cache,
-        )
+    configurations = symmetric_configurations(args)
+    oracle_memory: dict[int, tuple[pl.DataFrame, dict]] = {}
+    if args.compact:
+        if args.context_ids:
+            print("row | context | config | seed | K | recall | mass")
+        else:
+            print(
+                "config | seed | K | n | recall | mass | min | zero | "
+                "bounded-ms | wall-s | oracle-hit/miss"
+            )
+    for label, message_limit, state_limit, proposal_limit in configurations:
+        config_args = argparse.Namespace(**vars(args))
+        config_args.symmetric_message_limit = message_limit
+        config_args.symmetric_state_limit = state_limit
+        config_args.symmetric_forward_proposal_limit = proposal_limit
+        if not args.compact and len(configurations) > 1:
+            print(
+                f"\nConfiguration {label}: messages={message_limit}, "
+                f"states={state_limit}, proposals={proposal_limit}"
+            )
+        for exploration_seed in args.exploration_seeds or [42]:
+            compare_seed(
+                config_args,
+                label,
+                top_ks,
+                exploration_seed,
+                search,
+                steps,
+                initial_locations,
+                od_costs,
+                destination_inputs,
+                profiles,
+                profile_by_context,
+                population_by_stratum,
+                oracle_cache,
+                oracle_memory,
+            )
 
 
 if __name__ == "__main__":
