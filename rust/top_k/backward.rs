@@ -13,6 +13,7 @@ fn backward_beam(
     let candidate_cache = &mut scratch.candidate_cache;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
+    let active_trace = &mut scratch.active_trace;
     let candidate_inputs = CandidateInputs {
         graph,
         destinations,
@@ -38,6 +39,9 @@ fn backward_beam(
     }];
     let mut frontier = vec![0];
     let terminal_layer = context.steps.len() - 1;
+    if let Some(trace) = active_trace.as_mut() {
+        trace.retained(terminal_layer, graph.zone_index[&terminal_zone]);
+    }
     let mut frontiers = vec![Vec::new(); context.steps.len()];
     frontiers[terminal_layer] = frontier.clone();
     for layer in (first_layer..terminal_layer).rev() {
@@ -59,6 +63,9 @@ fn backward_beam(
             };
             let next_next_zone = next.next.map(|index| nodes[index].zone);
             let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
+            if let Some(trace) = active_trace.as_mut() {
+                trace.proposed(layer, &reverse_candidates);
+            }
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -92,7 +99,13 @@ fn backward_beam(
             .iter()
             .map(|&index| scores[index])
             .collect::<Vec<_>>();
-        frontier = select_beam_indices(&scores, beam_width)
+        let selected = select_beam_indices(&scores, beam_width);
+        if let Some(trace) = active_trace.as_mut() {
+            for &index in &selected {
+                trace.retained(layer, children[index].1);
+            }
+        }
+        frontier = selected
             .into_iter()
             .map(|index| {
                 let (next_index, destination, exact_increment) = children[index];
@@ -177,6 +190,11 @@ fn extend_backward_guidance(
             messages.partial_frontiers[stitch_layer + 1] = frontier.clone()
         }
     }
+    if let Some(trace) = scratch.active_trace.as_mut() {
+        for &node_index in &frontier {
+            trace.guidance_retained(stitch_layer + 1, messages.nodes[node_index].zone);
+        }
+    }
     for layer in (0..=stitch_layer).rev() {
         let layer_width = if mode == BackwardGuidanceMode::Partial && layer < stitch_layer {
             inputs.options.symmetric_state_limit
@@ -231,6 +249,9 @@ fn extend_backward_guidance(
             } else {
                 candidates(candidate_inputs, query, candidate_cache)?
             };
+            if let Some(trace) = scratch.active_trace.as_mut() {
+                trace.guidance_proposed(layer, &reverse_candidates);
+            }
             for candidate in reverse_candidates {
                 report.backward_candidate_evaluations += 1;
                 let score = local_scores.score(
@@ -242,6 +263,7 @@ fn extend_backward_guidance(
                 );
                 if let Some(score) = score {
                     let partial = if mode == BackwardGuidanceMode::Partial {
+                        factor_map_cache.reverse_prefix_partial_calls += 1;
                         let Some(partial) = reverse_prefix_partial_score(
                             inputs,
                             layer,
@@ -264,6 +286,11 @@ fn extend_backward_guidance(
         if children.is_empty() {
             frontier.clear();
             break;
+        }
+        if mode == BackwardGuidanceMode::Exact {
+            if let Some(trace) = scratch.active_trace.as_mut() {
+                trace.exact_guidance_rank(layer, &children, &scores);
+            }
         }
         if mode == BackwardGuidanceMode::Partial {
             if let Some(anchor) = context.steps[layer].anchor_id {
@@ -320,6 +347,11 @@ fn extend_backward_guidance(
         match mode {
             BackwardGuidanceMode::Exact => messages.guidance_frontiers[layer] = frontier.clone(),
             BackwardGuidanceMode::Partial => messages.partial_frontiers[layer] = frontier.clone(),
+        }
+        if let Some(trace) = scratch.active_trace.as_mut() {
+            for &node_index in &frontier {
+                trace.guidance_retained(layer, messages.nodes[node_index].zone);
+            }
         }
     }
     if let Some(started) = started {

@@ -4,10 +4,13 @@ use pyo3::types::{PyAny, PyDict, PyTuple};
 use crate::errors::SamplerError;
 use crate::input::{parse_destination_inputs, parse_od_costs, parse_reference_contexts};
 use crate::model::{DestinationIndex, OdGraph};
-use crate::oracle::{search_reference_top_k, HeapSearchReport};
+use crate::oracle::{enumerate_reference_distribution, search_reference_top_k, HeapSearchReport};
 use crate::output::to_polars_dataframe;
 use crate::scoring::Parameters;
-use crate::top_k::{search_top_k_all, CandidateStrategy, TopKOptions, TopKReport};
+use crate::top_k::{
+    search_top_k_all, ActiveTraceRequest, CandidateStrategy, TopKOptions, TopKReport,
+};
+use std::sync::Arc;
 
 /// Active deterministic destination-plan search.
 ///
@@ -38,7 +41,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=8, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=8, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -61,10 +64,13 @@ impl DestinationPlanSearch {
         continuation_state_limit: usize,
         continuation_proposal_limit: usize,
         seam_refresh_per_prefix: usize,
+        heuristic_reserve_limit: usize,
         top_k: u32,
         n_threads: Option<usize>,
         skip_infeasible: bool,
         collect_profile: bool,
+        active_trace_context_id: Option<u64>,
+        active_trace_target_plans: Option<Vec<Vec<u32>>>,
     ) -> PyResult<PyObject> {
         validate_logit_scale(logit_scale)?;
         validate_top_k(top_k as usize)?;
@@ -91,6 +97,18 @@ impl DestinationPlanSearch {
         }
         let contexts = parse_reference_contexts(steps, initial_locations)?;
         let candidate_strategy = CandidateStrategy::parse(candidate_strategy)?;
+        let active_trace = match (active_trace_context_id, active_trace_target_plans) {
+            (None, None) => None,
+            (Some(context_id), Some(target_plans)) => Some(ActiveTraceRequest {
+                context_id,
+                target_plans: Arc::from(target_plans),
+            }),
+            _ => return Err(SamplerError::InvalidInput(
+                "active_trace_context_id and active_trace_target_plans must be supplied together"
+                    .to_string(),
+            )
+            .into()),
+        };
         let parameters = Parameters {
             logit_scale,
             update_plan_timings,
@@ -118,7 +136,9 @@ impl DestinationPlanSearch {
                     continuation_state_limit,
                     continuation_proposal_limit,
                     seam_refresh_per_prefix,
+                    heuristic_reserve_limit,
                     profile: collect_profile,
+                    active_trace,
                 },
                 n_threads,
             )
@@ -183,6 +203,67 @@ impl DestinationPlanSearch {
         )?
         .into())
     }
+
+    /// Enumerate the full exact exp(U) distribution for one small context.
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, max_assignments=100_000))]
+    #[allow(clippy::too_many_arguments)]
+    fn exact_distribution(
+        &self,
+        py: Python<'_>,
+        steps: &Bound<'_, PyAny>,
+        initial_locations: &Bound<'_, PyAny>,
+        logit_scale: f64,
+        update_plan_timings: bool,
+        use_shadow_prices: bool,
+        max_assignments: usize,
+    ) -> PyResult<PyObject> {
+        validate_logit_scale(logit_scale)?;
+        if max_assignments == 0 {
+            return Err(
+                SamplerError::InvalidInput("max_assignments must be positive".to_string()).into(),
+            );
+        }
+        let contexts = parse_reference_contexts(steps, initial_locations)?;
+        if contexts.len() != 1 {
+            return Err(SamplerError::InvalidInput(
+                "exact_distribution accepts exactly one context".to_string(),
+            )
+            .into());
+        }
+        let parameters = Parameters {
+            logit_scale,
+            update_plan_timings,
+            use_shadow_prices,
+            skip_infeasible: false,
+        };
+        let distribution = py.allow_threads(|| {
+            enumerate_reference_distribution(
+                &self.graph,
+                &self.destination_index,
+                &contexts[0],
+                parameters,
+                max_assignments,
+            )
+        })?;
+        let maximum = distribution.scores[0];
+        let log_normalizer = maximum
+            + distribution
+                .scores
+                .iter()
+                .map(|score| (score - maximum).exp())
+                .sum::<f64>()
+                .ln();
+        let feasible_plans = distribution.scores.len();
+        let result = PyDict::new(py);
+        result.set_item("scores", distribution.scores)?;
+        result.set_item("feasible_plans", feasible_plans)?;
+        result.set_item(
+            "assignment_lattice",
+            distribution.assignment_lattice.to_string(),
+        )?;
+        result.set_item("log_normalizer", log_normalizer)?;
+        Ok(result.into())
+    }
 }
 
 fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObject> {
@@ -216,7 +297,45 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     )?;
     result.set_item("factor_map_next_hits", report.factor_map_next_hits)?;
     result.set_item("factor_map_next_builds", report.factor_map_next_builds)?;
+    result.set_item(
+        "factor_map_previous_destination_scans",
+        report.factor_map_previous_destination_scans,
+    )?;
+    result.set_item(
+        "factor_map_current_destination_scans",
+        report.factor_map_current_destination_scans,
+    )?;
+    result.set_item(
+        "factor_map_next_destination_scans",
+        report.factor_map_next_destination_scans,
+    )?;
+    result.set_item(
+        "factor_map_previous_feasible_entries",
+        report.factor_map_previous_feasible_entries,
+    )?;
+    result.set_item(
+        "factor_map_current_feasible_entries",
+        report.factor_map_current_feasible_entries,
+    )?;
+    result.set_item(
+        "factor_map_next_feasible_entries",
+        report.factor_map_next_feasible_entries,
+    )?;
+    result.set_item(
+        "reverse_prefix_partial_calls",
+        report.reverse_prefix_partial_calls,
+    )?;
+    result.set_item("local_score_cache_hits", report.local_score_cache_hits)?;
+    result.set_item("local_score_cache_builds", report.local_score_cache_builds)?;
     result.set_item("continuation_proposals", report.continuation_proposals)?;
+    result.set_item(
+        "heuristic_reserve_triggers",
+        report.heuristic_reserve_triggers,
+    )?;
+    result.set_item(
+        "heuristic_reserve_proposals",
+        report.heuristic_reserve_proposals,
+    )?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
     result.set_item("stitch_pairs", report.stitch_pairs)?;
@@ -233,6 +352,44 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("stitch_ns", report.stitch_ns)?;
     result.set_item("materialize_ns", report.materialize_ns)?;
     result.set_item("total_search_ns", report.total_search_ns)?;
+    let active_trace = report
+        .active_trace_targets
+        .iter()
+        .map(|target| {
+            let item = PyDict::new(py);
+            item.set_item("zones", &target.zones)?;
+            item.set_item("proposed", &target.proposed)?;
+            item.set_item("retained", &target.retained)?;
+            item.set_item("prefix_proposed", &target.prefix_proposed)?;
+            item.set_item("prefix_retained", &target.prefix_retained)?;
+            item.set_item("guidance_retained", &target.guidance_retained)?;
+            item.set_item("guidance_proposed", &target.guidance_proposed)?;
+            item.set_item("exact_guidance_rank", &target.exact_guidance_rank)?;
+            item.set_item(
+                "prefix_pruned",
+                target
+                    .prefix_proposed
+                    .iter()
+                    .zip(&target.prefix_retained)
+                    .map(|(proposed, retained)| match (proposed, retained) {
+                        (Some(proposed), Some(retained)) => Some(*proposed && !*retained),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            )?;
+            item.set_item(
+                "pruned",
+                target
+                    .proposed
+                    .iter()
+                    .zip(&target.retained)
+                    .map(|(proposed, retained)| *proposed && !retained)
+                    .collect::<Vec<_>>(),
+            )?;
+            Ok(item.into_any().unbind())
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    result.set_item("active_trace_targets", active_trace)?;
     Ok(result.into())
 }
 

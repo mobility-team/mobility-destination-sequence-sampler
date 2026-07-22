@@ -566,6 +566,56 @@ def trace_oracle_candidate_coverage(
             print("    legacy diagnosis: heuristic-supported; active loss stage unknown")
 
 
+def trace_active_stage_coverage(report: dict[str, object]) -> None:
+    """Show bounded-search proposal and retention for oracle targets."""
+    traces = report.get("active_trace_targets", [])
+    print(
+        "active factor-map trace (proposed / retained / pruned; "
+        f"heuristic-reserve triggers={report['heuristic_reserve_triggers']}, "
+        f"proposals={report['heuristic_reserve_proposals']}):"
+    )
+    for rank, trace in enumerate(traces, start=1):
+        zones = trace["zones"]
+        proposed = trace["proposed"]
+        retained = trace["retained"]
+        pruned = trace["pruned"]
+        prefix_proposed = trace["prefix_proposed"]
+        prefix_retained = trace["prefix_retained"]
+        prefix_pruned = trace["prefix_pruned"]
+        guidance_retained = trace["guidance_retained"]
+        guidance_proposed = trace["guidance_proposed"]
+        exact_guidance_rank = trace["exact_guidance_rank"]
+        print(f"  exact rank={rank} zones={tuple(zones)}")
+        for layer, (zone, was_proposed, was_retained, was_pruned) in enumerate(
+            zip(zones, proposed, retained, pruned, strict=True)
+        ):
+            state = "retained" if was_retained else "pruned" if was_pruned else "not-proposed"
+            print(
+                f"    layer={layer} zone={zone}: {state} "
+                f"(proposed={was_proposed}, retained={was_retained})"
+            )
+            if prefix_proposed[layer] is None:
+                print("      coherent prefix: not evaluated in the forward pass")
+                continue
+            coherent_state = (
+                "retained"
+                if prefix_retained[layer]
+                else "pruned"
+                if prefix_pruned[layer]
+                else "not-proposed"
+            )
+            print(
+                f"      coherent prefix through layer {layer}: {coherent_state} "
+                f"(proposed={prefix_proposed[layer]}, retained={prefix_retained[layer]})"
+            )
+            if guidance_proposed[layer] or guidance_retained[layer]:
+                print(
+                    f"      reverse guidance: target proposed={guidance_proposed[layer]}, "
+                    f"retained={guidance_retained[layer]}, "
+                    f"exact-rank={exact_guidance_rank[layer]}"
+                )
+
+
 def trace_first_layer_and_plan_components(
     context_steps: pl.DataFrame,
     initial_zone: int,
@@ -878,7 +928,15 @@ def compare_seed(
         for top_k in top_ks:
             try:
                 bounded_started = time.perf_counter()
-                bounded_table, _ = search.top_k(
+                active_trace = (
+                    {
+                        "active_trace_context_id": context_id,
+                        "active_trace_target_plans": [list(zones) for zones, _ in oracle[:top_k]],
+                    }
+                    if args.trace_context == context_id
+                    else {}
+                )
+                bounded_table, bounded_report = search.top_k(
                     steps=context_steps,
                     initial_locations=context_initial,
                     logit_scale=LOGIT_SCALE,
@@ -889,8 +947,11 @@ def compare_seed(
                     top_k=top_k,
                     n_threads=1,
                     skip_infeasible=False,
+                    **active_trace,
                 )
                 bounded_search_seconds[top_k] += time.perf_counter() - bounded_started
+                if args.trace_context == context_id:
+                    trace_active_stage_coverage(bounded_report)
             except ValueError as error:
                 skipped += 1
                 if audit_mode:

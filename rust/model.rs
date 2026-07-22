@@ -10,6 +10,18 @@ pub struct Edge {
     pub time: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Travel {
+    cost: f64,
+    time: f64,
+}
+
+#[derive(Debug)]
+struct DenseTravel {
+    forward: Vec<Travel>,
+    transpose: Vec<Travel>,
+}
+
 /// Shared sparse OD graph stored in compressed sparse row form.
 #[derive(Debug)]
 pub struct OdGraph {
@@ -25,6 +37,7 @@ pub struct OdGraph {
     outgoing_time_bands: Vec<u8>,
     incoming_time_bands: Vec<u8>,
     dense_edge_indices: Option<Vec<usize>>,
+    dense_travel: Option<DenseTravel>,
 }
 
 impl OdGraph {
@@ -187,6 +200,31 @@ impl OdGraph {
                 }
                 indices
             });
+        // Factor-map scans have a fixed origin or destination and walk an
+        // activity domain.  Keep both dense orientations as compact travel
+        // values so those scans avoid an index indirection and, importantly,
+        // a cache-unfriendly column walk through the row-major edge store.
+        let dense_travel = dense_size
+            .filter(|&size| size <= edges.len().saturating_mul(4))
+            .map(|size| {
+                let missing = Travel {
+                    cost: f64::NAN,
+                    time: f64::NAN,
+                };
+                let mut forward = vec![missing; size];
+                let mut transpose = vec![missing; size];
+                for origin in 0..zone_ids.len() {
+                    for edge in &edges[offsets[origin]..offsets[origin + 1]] {
+                        let travel = Travel {
+                            cost: edge.cost,
+                            time: edge.time,
+                        };
+                        forward[origin * zone_ids.len() + edge.destination] = travel;
+                        transpose[edge.destination * zone_ids.len() + origin] = travel;
+                    }
+                }
+                DenseTravel { forward, transpose }
+            });
 
         Ok(Self {
             zone_ids,
@@ -201,6 +239,7 @@ impl OdGraph {
             outgoing_time_bands,
             incoming_time_bands,
             dense_edge_indices,
+            dense_travel,
         })
     }
 
@@ -234,6 +273,40 @@ impl OdGraph {
     pub fn edge_to(&self, origin: usize, destination: usize) -> Option<Edge> {
         self.edge_index_to(origin, destination)
             .map(|edge_index| self.edges[edge_index])
+    }
+
+    /// Exact travel edge read from the row-major dense factor-map view when
+    /// available. Sparse graphs retain the regular CSR lookup.
+    #[inline]
+    pub fn factor_edge_from(&self, origin: usize, destination: usize) -> Option<Edge> {
+        self.dense_travel
+            .as_ref()
+            .and_then(|travel| {
+                let value = travel.forward[origin * self.zone_ids.len() + destination];
+                value.cost.is_finite().then_some(Edge {
+                    destination,
+                    cost: value.cost,
+                    time: value.time,
+                })
+            })
+            .or_else(|| self.edge_to(origin, destination))
+    }
+
+    /// Exact travel edge read from the destination-major dense factor-map
+    /// view. This makes a varying origin with a fixed destination contiguous.
+    #[inline]
+    pub fn factor_edge_to(&self, origin: usize, destination: usize) -> Option<Edge> {
+        self.dense_travel
+            .as_ref()
+            .and_then(|travel| {
+                let value = travel.transpose[destination * self.zone_ids.len() + origin];
+                value.cost.is_finite().then_some(Edge {
+                    destination,
+                    cost: value.cost,
+                    time: value.time,
+                })
+            })
+            .or_else(|| self.edge_to(origin, destination))
     }
 
     fn edge_index_to(&self, origin: usize, destination: usize) -> Option<usize> {

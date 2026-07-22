@@ -11,6 +11,7 @@ oracle. Mobility prepares inputs; this package owns destination choice.
 |---|---|
 | `top_k()` | Bounded bidirectional search. Approximate, exact-score-ranked returned plans. |
 | `exact_top_k()` | Small-context oracle. Proves the requested top-K or raises at `max_states`. |
+| `exact_distribution()` | Guarded full exp(U) enumeration for a single small diagnostic context. |
 
 `top_k()` uses unbinned exact factor-map proposals through depth 5 and bounded
 attractive, OD-near, and deterministic exploration proposals for longer plans;

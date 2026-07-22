@@ -19,6 +19,7 @@ ACTIVE_TOP_K_DEFAULTS = {
     "continuation_state_limit": 1,
     "continuation_proposal_limit": 1,
     "seam_refresh_per_prefix": 1,
+    "heuristic_reserve_limit": 0,
 }
 
 
@@ -77,6 +78,12 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         "--seam-refresh-per-prefix",
         type=int,
         default=ACTIVE_TOP_K_DEFAULTS["seam_refresh_per_prefix"],
+    )
+    parser.add_argument(
+        "--heuristic-reserve-limit",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["heuristic_reserve_limit"],
+        help="add this many heuristic candidates when factor-map and heuristic support share fewer than this many zones",
     )
 
 

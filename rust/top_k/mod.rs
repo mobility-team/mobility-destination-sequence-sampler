@@ -7,6 +7,7 @@
 //! stitching.
 
 use std::collections::{hash_map::Entry, BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -93,6 +94,9 @@ enum BackwardGuidanceMode {
 #[derive(Default)]
 struct LocalScoreCache {
     values: HashMap<(usize, usize, usize, Option<usize>), Option<f64>>,
+    profile: bool,
+    hits: u64,
+    builds: u64,
 }
 
 #[derive(Default)]
@@ -109,16 +113,69 @@ struct FactorMapCache {
     current_builds: u64,
     next_hits: u64,
     next_builds: u64,
+    previous_destination_scans: u64,
+    current_destination_scans: u64,
+    next_destination_scans: u64,
+    previous_feasible_entries: u64,
+    current_feasible_entries: u64,
+    next_feasible_entries: u64,
+    reverse_prefix_partial_calls: u64,
 }
 
 /// Feasible factor scores, aligned to an activity-domain position rather than
 /// the global zone index. Infeasible destinations are omitted completely.
-#[derive(Default)]
+enum FactorPositions {
+    U16(Vec<u16>),
+    Usize(Vec<usize>),
+}
+
 struct FactorScoreMap {
-    entries: Vec<(usize, f64)>,
+    positions: FactorPositions,
+    scores: Vec<f64>,
+}
+
+impl FactorScoreMap {
+    fn with_capacity(domain_len: usize) -> Self {
+        let positions = if u16::try_from(domain_len.saturating_sub(1)).is_ok() {
+            FactorPositions::U16(Vec::with_capacity(domain_len))
+        } else {
+            FactorPositions::Usize(Vec::with_capacity(domain_len))
+        };
+        Self {
+            positions,
+            scores: Vec::with_capacity(domain_len),
+        }
+    }
+
+    fn push(&mut self, position: usize, score: f64) {
+        match &mut self.positions {
+            FactorPositions::U16(positions) => positions.push(position as u16),
+            FactorPositions::Usize(positions) => positions.push(position),
+        }
+        self.scores.push(score);
+    }
+
+    fn len(&self) -> usize {
+        self.scores.len()
+    }
+
+    fn entry(&self, index: usize) -> (usize, f64) {
+        let position = match &self.positions {
+            FactorPositions::U16(positions) => positions[index] as usize,
+            FactorPositions::Usize(positions) => positions[index],
+        };
+        (position, self.scores[index])
+    }
 }
 
 impl LocalScoreCache {
+    fn new(profile: bool) -> Self {
+        Self {
+            profile,
+            ..Self::default()
+        }
+    }
+
     fn score(
         &mut self,
         inputs: ScoringInputs<'_>,
@@ -129,7 +186,13 @@ impl LocalScoreCache {
     ) -> Option<f64> {
         let key = (layer, origin, destination, next_destination);
         if let Some(score) = self.values.get(&key) {
+            if self.profile {
+                self.hits += 1;
+            }
             return *score;
+        }
+        if self.profile {
+            self.builds += 1;
         }
         let score = score_local_weight(inputs, layer, origin, destination, next_destination);
         self.values.insert(key, score);
@@ -178,7 +241,18 @@ pub struct TopKReport {
     pub factor_map_current_builds: u64,
     pub factor_map_next_hits: u64,
     pub factor_map_next_builds: u64,
+    pub factor_map_previous_destination_scans: u64,
+    pub factor_map_current_destination_scans: u64,
+    pub factor_map_next_destination_scans: u64,
+    pub factor_map_previous_feasible_entries: u64,
+    pub factor_map_current_feasible_entries: u64,
+    pub factor_map_next_feasible_entries: u64,
+    pub reverse_prefix_partial_calls: u64,
+    pub local_score_cache_hits: u64,
+    pub local_score_cache_builds: u64,
     pub continuation_proposals: u64,
+    pub heuristic_reserve_triggers: u64,
+    pub heuristic_reserve_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
     pub stitch_pairs: u64,
@@ -195,9 +269,38 @@ pub struct TopKReport {
     pub stitch_ns: u64,
     pub materialize_ns: u64,
     pub total_search_ns: u64,
+    pub active_trace_targets: Vec<ActiveTraceTargetReport>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug)]
+pub struct ActiveTraceRequest {
+    pub context_id: u64,
+    pub target_plans: Arc<[Vec<u32>]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveTraceTargetReport {
+    pub zones: Vec<u32>,
+    pub proposed: Vec<bool>,
+    pub retained: Vec<bool>,
+    /// Whether the exact target prefix through each layer entered that
+    /// layer's candidate set. Unlike `proposed`, this keeps parent lineage.
+    pub prefix_proposed: Vec<Option<bool>>,
+    /// Whether the exact target prefix through each layer survived the
+    /// forward frontier. Unlike `retained`, this keeps parent lineage.
+    pub prefix_retained: Vec<Option<bool>>,
+    /// Whether a target zone appeared in either retained reverse-guidance
+    /// frontier at the corresponding layer.
+    pub guidance_retained: Vec<bool>,
+    /// Whether a target zone entered either reverse-guidance candidate pool
+    /// at the corresponding layer.
+    pub guidance_proposed: Vec<bool>,
+    /// Best rank of a target zone in the exact reverse-guidance candidate
+    /// score at each layer; `None` means it was never proposed there.
+    pub exact_guidance_rank: Vec<Option<usize>>,
+}
+
+#[derive(Clone)]
 pub struct TopKOptions {
     pub exploration_seed: u64,
     pub result_limit: u32,
@@ -213,7 +316,156 @@ pub struct TopKOptions {
     pub continuation_state_limit: usize,
     pub continuation_proposal_limit: usize,
     pub seam_refresh_per_prefix: usize,
+    pub heuristic_reserve_limit: usize,
     pub profile: bool,
+    pub active_trace: Option<ActiveTraceRequest>,
+}
+
+struct ActiveTrace {
+    targets: Vec<(Vec<usize>, ActiveTraceTargetReport)>,
+}
+
+impl ActiveTrace {
+    fn new(
+        request: &ActiveTraceRequest,
+        graph: &OdGraph,
+        context: &Context,
+    ) -> Result<Self, SamplerError> {
+        let mut targets = Vec::with_capacity(request.target_plans.len());
+        for zones in request.target_plans.iter() {
+            if zones.len() != context.steps.len() {
+                return Err(SamplerError::InvalidInput(format!(
+                    "active trace target for context {} has {} zones; expected {}",
+                    context.context_id,
+                    zones.len(),
+                    context.steps.len()
+                )));
+            }
+            let internal = zones
+                .iter()
+                .map(|zone| {
+                    graph.zone_index.get(zone).copied().ok_or_else(|| {
+                        SamplerError::InvalidInput(format!(
+                            "active trace target references unknown zone {zone}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            targets.push((
+                internal,
+                ActiveTraceTargetReport {
+                    zones: zones.clone(),
+                    proposed: vec![false; zones.len()],
+                    retained: vec![false; zones.len()],
+                    prefix_proposed: vec![None; zones.len()],
+                    prefix_retained: vec![None; zones.len()],
+                    guidance_retained: vec![false; zones.len()],
+                    guidance_proposed: vec![false; zones.len()],
+                    exact_guidance_rank: vec![None; zones.len()],
+                },
+            ));
+        }
+        Ok(Self { targets })
+    }
+
+    fn proposed(&mut self, layer: usize, candidates: &[usize]) {
+        for (targets, report) in &mut self.targets {
+            report.proposed[layer] |= candidates.contains(&targets[layer]);
+        }
+    }
+
+    fn retained(&mut self, layer: usize, destination: usize) {
+        for (targets, report) in &mut self.targets {
+            report.retained[layer] |= targets[layer] == destination;
+        }
+    }
+
+    fn prefix_matches(
+        nodes: &[PrefixNode],
+        mut node_index: usize,
+        target: &[usize],
+        prefix_len: usize,
+    ) -> bool {
+        for expected_layer in (0..prefix_len).rev() {
+            let node = &nodes[node_index];
+            if node.parent.is_none() || node.zone != target[expected_layer] {
+                return false;
+            }
+            node_index = node.parent.expect("non-root prefix node has a parent");
+        }
+        true
+    }
+
+    fn prefix_proposed(
+        &mut self,
+        layer: usize,
+        nodes: &[PrefixNode],
+        parent_index: usize,
+        candidates: &[usize],
+    ) {
+        for (target, report) in &mut self.targets {
+            let matches_target = candidates.contains(&target[layer])
+                && Self::prefix_matches(nodes, parent_index, target, layer);
+            report.prefix_proposed[layer] =
+                Some(report.prefix_proposed[layer].unwrap_or(false) || matches_target);
+        }
+    }
+
+    fn prefix_retained(
+        &mut self,
+        layer: usize,
+        nodes: &[PrefixNode],
+        parent_index: usize,
+        destination: usize,
+    ) {
+        for (target, report) in &mut self.targets {
+            let matches_target = destination == target[layer]
+                && Self::prefix_matches(nodes, parent_index, target, layer);
+            report.prefix_retained[layer] =
+                Some(report.prefix_retained[layer].unwrap_or(false) || matches_target);
+        }
+    }
+
+    fn guidance_retained(&mut self, layer: usize, destination: usize) {
+        for (targets, report) in &mut self.targets {
+            report.guidance_retained[layer] |= targets[layer] == destination;
+        }
+    }
+
+    fn guidance_proposed(&mut self, layer: usize, candidates: &[usize]) {
+        for (targets, report) in &mut self.targets {
+            report.guidance_proposed[layer] |= candidates.contains(&targets[layer]);
+        }
+    }
+
+    fn exact_guidance_rank(
+        &mut self,
+        layer: usize,
+        children: &[(usize, usize, f64)],
+        scores: &[f64],
+    ) {
+        let mut ranked = scores.iter().copied().enumerate().collect::<Vec<_>>();
+        ranked.sort_unstable_by(|(left_index, left), (right_index, right)| {
+            right
+                .total_cmp(left)
+                .then_with(|| left_index.cmp(right_index))
+        });
+        for (target, report) in &mut self.targets {
+            let rank = ranked
+                .iter()
+                .position(|(index, _)| children[*index].1 == target[layer])
+                .map(|index| index + 1);
+            if let Some(rank) = rank {
+                report.exact_guidance_rank[layer] = Some(
+                    report.exact_guidance_rank[layer].map_or(rank, |existing| existing.min(rank)),
+                );
+            }
+        }
+    }
+
+    fn into_reports(self) -> Vec<ActiveTraceTargetReport> {
+        self.targets.into_iter().map(|(_, report)| report).collect()
+    }
 }
 
 /// Immutable data shared by every pass of one context search.
@@ -252,29 +504,49 @@ struct SearchScratch {
     factor_map_ranked: Vec<(f64, usize)>,
     local_scores: LocalScoreCache,
     report: TopKReport,
+    active_trace: Option<ActiveTrace>,
 }
 
 impl SearchScratch {
-    fn new() -> Self {
+    fn new(profile: bool, active_trace: Option<ActiveTrace>) -> Self {
         Self {
             candidate_cache: CandidateCache::default(),
             factor_map_cache: FactorMapCache::default(),
             factor_map_ranked: Vec::new(),
-            local_scores: LocalScoreCache::default(),
+            local_scores: LocalScoreCache::new(profile),
             report: TopKReport {
                 contexts: 1,
                 ..TopKReport::default()
             },
+            active_trace,
         }
     }
 
     fn into_report(mut self) -> TopKReport {
+        if let Some(trace) = self.active_trace.take() {
+            self.report.active_trace_targets = trace.into_reports();
+        }
         self.report.factor_map_previous_hits = self.factor_map_cache.previous_hits;
         self.report.factor_map_previous_builds = self.factor_map_cache.previous_builds;
         self.report.factor_map_current_hits = self.factor_map_cache.current_hits;
         self.report.factor_map_current_builds = self.factor_map_cache.current_builds;
         self.report.factor_map_next_hits = self.factor_map_cache.next_hits;
         self.report.factor_map_next_builds = self.factor_map_cache.next_builds;
+        self.report.factor_map_previous_destination_scans =
+            self.factor_map_cache.previous_destination_scans;
+        self.report.factor_map_current_destination_scans =
+            self.factor_map_cache.current_destination_scans;
+        self.report.factor_map_next_destination_scans =
+            self.factor_map_cache.next_destination_scans;
+        self.report.factor_map_previous_feasible_entries =
+            self.factor_map_cache.previous_feasible_entries;
+        self.report.factor_map_current_feasible_entries =
+            self.factor_map_cache.current_feasible_entries;
+        self.report.factor_map_next_feasible_entries = self.factor_map_cache.next_feasible_entries;
+        self.report.reverse_prefix_partial_calls =
+            self.factor_map_cache.reverse_prefix_partial_calls;
+        self.report.local_score_cache_hits = self.local_scores.hits;
+        self.report.local_score_cache_builds = self.local_scores.builds;
         self.report
     }
 }
@@ -292,7 +564,18 @@ impl TopKReport {
         self.factor_map_current_builds += other.factor_map_current_builds;
         self.factor_map_next_hits += other.factor_map_next_hits;
         self.factor_map_next_builds += other.factor_map_next_builds;
+        self.factor_map_previous_destination_scans += other.factor_map_previous_destination_scans;
+        self.factor_map_current_destination_scans += other.factor_map_current_destination_scans;
+        self.factor_map_next_destination_scans += other.factor_map_next_destination_scans;
+        self.factor_map_previous_feasible_entries += other.factor_map_previous_feasible_entries;
+        self.factor_map_current_feasible_entries += other.factor_map_current_feasible_entries;
+        self.factor_map_next_feasible_entries += other.factor_map_next_feasible_entries;
+        self.reverse_prefix_partial_calls += other.reverse_prefix_partial_calls;
+        self.local_score_cache_hits += other.local_score_cache_hits;
+        self.local_score_cache_builds += other.local_score_cache_builds;
         self.continuation_proposals += other.continuation_proposals;
+        self.heuristic_reserve_triggers += other.heuristic_reserve_triggers;
+        self.heuristic_reserve_proposals += other.heuristic_reserve_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
         self.stitch_pairs += other.stitch_pairs;
@@ -309,6 +592,8 @@ impl TopKReport {
         self.stitch_ns += other.stitch_ns;
         self.materialize_ns += other.materialize_ns;
         self.total_search_ns += other.total_search_ns;
+        self.active_trace_targets
+            .extend(other.active_trace_targets.iter().cloned());
     }
 }
 

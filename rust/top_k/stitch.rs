@@ -175,7 +175,14 @@ fn search_context(
         anchor_slots,
         repeated_anchor_slots,
     };
-    let mut scratch = SearchScratch::new();
+    let active_trace = inputs
+        .options
+        .active_trace
+        .as_ref()
+        .filter(|request| request.context_id == context.context_id)
+        .map(|request| ActiveTrace::new(request, graph, context))
+        .transpose()?;
+    let mut scratch = SearchScratch::new(inputs.options.profile, active_trace);
     if let Some(started) = build_started {
         scratch.report.build_problem_ns += started.elapsed().as_nanos() as u64;
     }
@@ -317,7 +324,7 @@ pub fn search_top_k_all(
     let compute = || {
         contexts
             .par_iter()
-            .map(|context| search_context(graph, destinations, context, parameters, options))
+            .map(|context| search_context(graph, destinations, context, parameters, options.clone()))
             .collect::<Vec<_>>()
     };
     let results = if let Some(n_threads) = n_threads {

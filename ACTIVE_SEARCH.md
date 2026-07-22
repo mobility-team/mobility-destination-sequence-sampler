@@ -93,6 +93,7 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 change active defaults based on a single context; use the quality harness and
 record the decision in the active experiment note.
 
+
 The returned output has one row per `(context_id, draw_id, layer)`: `origin`,
 `destination`, `local_log_weight`, and the plan-level `total_log_weight`.
 Draws are descending by total utility. With `collect_profile=True`, the

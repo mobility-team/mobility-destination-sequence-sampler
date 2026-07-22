@@ -7,6 +7,7 @@
 | Default bounded quality against proof | `just compare-quality` | Recall@10 and Mass@10 |
 | Output-size behavior | `just compare-k-sweep-seeds` | Recall/Mass across K against top-500 support |
 | Whole-workload budget | `just benchmark-throughput` | wall time, complete/infeasible contexts, profile counts |
+| Returned-support concentration | `just diagnose-returned-distribution` | conditional mass@10/20/50 within returned top-100 |
 | Symmetric tuning | `just sweep-symmetric` | compact comparison of message/state/proposal widths |
 | Regression cases | `just canary-quality` | fixed difficult contexts with cached exact answers |
 
@@ -24,6 +25,11 @@ uses the listed workload, release build, and configuration.
 - **Complete / infeasible**: contexts that yielded a complete sequence or
   none under the supplied feasibility/scoring inputs; this is not an oracle
   accuracy measure.
+
+The returned-support diagnostic normalizes only over the bounded plans it
+received (normally top-100). It is useful for comparing head concentration and
+detecting flat returned supports, but it is a lower-bound diagnostic—not an
+estimate of the full exp(U) distribution.
 
 The oracle may reject a context at `max_states`. Coverage and exclusions from
 that outcome must remain visible; do not silently treat an unproven context as

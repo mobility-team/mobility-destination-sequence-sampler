@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=10)
     add_top_k_tuning_arguments(parser)
     parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--exploration-seed", type=int, default=42)
     parser.add_argument(
         "--profile",
@@ -105,21 +106,27 @@ def main() -> None:
         od_costs=od_costs,
         destination_inputs=destination_inputs,
     )
-    started = time.perf_counter()
-    bidirectional, bidirectional_report = search.top_k(
-        steps=steps,
-        initial_locations=initial_locations,
-        logit_scale=LOGIT_SCALE,
-        update_plan_timings=True,
-        use_shadow_prices=True,
-        exploration_seed=args.exploration_seed,
-        **top_k_tuning_options(args),
-        top_k=args.top_k,
-        n_threads=args.threads,
-        skip_infeasible=True,
-        collect_profile=args.profile,
-    )
-    bidirectional_seconds = time.perf_counter() - started
+    if args.repeats <= 0:
+        raise ValueError("--repeats must be positive")
+    runs = []
+    for _ in range(args.repeats):
+        started = time.perf_counter()
+        bidirectional, bidirectional_report = search.top_k(
+            steps=steps,
+            initial_locations=initial_locations,
+            logit_scale=LOGIT_SCALE,
+            update_plan_timings=True,
+            use_shadow_prices=True,
+            exploration_seed=args.exploration_seed,
+            **top_k_tuning_options(args),
+            top_k=args.top_k,
+            n_threads=args.threads,
+            skip_infeasible=True,
+            collect_profile=args.profile,
+        )
+        runs.append((time.perf_counter() - started, bidirectional, bidirectional_report))
+    runs.sort(key=lambda run: run[0])
+    bidirectional_seconds, bidirectional, bidirectional_report = runs[len(runs) // 2]
 
     print("\nbounded top-K")
     print(
@@ -158,6 +165,20 @@ def main() -> None:
         f"{bidirectional_report['factor_map_current_builds']} hit/build "
         f"next={bidirectional_report['factor_map_next_hits']}/"
         f"{bidirectional_report['factor_map_next_builds']} hit/build"
+    )
+    print(
+        "factor-map exact work "
+        f"scans previous/current/next="
+        f"{bidirectional_report['factor_map_previous_destination_scans']}/"
+        f"{bidirectional_report['factor_map_current_destination_scans']}/"
+        f"{bidirectional_report['factor_map_next_destination_scans']} "
+        f"feasible="
+        f"{bidirectional_report['factor_map_previous_feasible_entries']}/"
+        f"{bidirectional_report['factor_map_current_feasible_entries']}/"
+        f"{bidirectional_report['factor_map_next_feasible_entries']} "
+        f"reverse-prefix-partials={bidirectional_report['reverse_prefix_partial_calls']} "
+        f"local-score-cache hit/build={bidirectional_report['local_score_cache_hits']}/"
+        f"{bidirectional_report['local_score_cache_builds']}"
     )
     if args.profile:
         total_ns = bidirectional_report["total_search_ns"]

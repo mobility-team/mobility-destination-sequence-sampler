@@ -21,6 +21,108 @@ struct OracleProblem<'a> {
     has_cross_home_anchor: bool,
 }
 
+/// Exhaustive exact-score distribution for a deliberately small context.
+///
+/// This is an analysis oracle, not a production sampler.  Callers must set an
+/// explicit assignment cap before enumeration.
+pub struct ExactDistribution {
+    pub scores: Vec<f64>,
+    pub assignment_lattice: u128,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enumerate_distribution_assignments(
+    variable: usize,
+    assignments: &mut [usize],
+    graph: &OdGraph,
+    destinations: &DestinationIndex,
+    context: &Context,
+    problem: &OracleProblem<'_>,
+    parameters: Parameters,
+    scores: &mut Vec<f64>,
+) {
+    if variable == assignments.len() {
+        let zones = context
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(layer, step)| {
+                step.fixed_destination
+                    .map(|zone| graph.zone_index[&zone])
+                    .unwrap_or_else(|| assignments[problem.variable_by_layer[layer].unwrap()])
+            })
+            .collect::<Vec<_>>();
+        if let Some((score, _)) = score_zones(
+            ScoringInputs {
+                graph,
+                destinations,
+                context,
+                problem: &problem.scoring,
+                parameters,
+            },
+            &zones,
+        ) {
+            scores.push(score);
+        }
+        return;
+    }
+    for &zone in problem.domains[variable] {
+        assignments[variable] = zone;
+        enumerate_distribution_assignments(
+            variable + 1,
+            assignments,
+            graph,
+            destinations,
+            context,
+            problem,
+            parameters,
+            scores,
+        );
+    }
+}
+
+pub fn enumerate_reference_distribution(
+    graph: &OdGraph,
+    destinations: &DestinationIndex,
+    context: &Context,
+    parameters: Parameters,
+    max_assignments: usize,
+) -> Result<ExactDistribution, SamplerError> {
+    let (problem, _) = build_oracle_problem(graph, destinations, context)?;
+    let assignment_lattice = problem.domains.iter().fold(1_u128, |count, domain| {
+        count.saturating_mul(domain.len() as u128)
+    });
+    if assignment_lattice > max_assignments as u128 {
+        return Err(SamplerError::InvalidInput(format!(
+            "exact distribution needs {assignment_lattice} assignments in context {}; max_assignments={max_assignments}",
+            context.context_id
+        )));
+    }
+    let mut scores = Vec::with_capacity(assignment_lattice as usize);
+    let mut assignments = vec![0; problem.domains.len()];
+    enumerate_distribution_assignments(
+        0,
+        &mut assignments,
+        graph,
+        destinations,
+        context,
+        &problem,
+        parameters,
+        &mut scores,
+    );
+    if scores.is_empty() {
+        return Err(SamplerError::NoFeasibleSequence {
+            context_id: context.context_id,
+            origin: context.initial_zone,
+        });
+    }
+    scores.sort_unstable_by(|left, right| right.total_cmp(left));
+    Ok(ExactDistribution {
+        scores,
+        assignment_lattice,
+    })
+}
+
 fn split_ranges_at_home(graph: &OdGraph, context: &Context) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = 0;

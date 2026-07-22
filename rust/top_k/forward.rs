@@ -14,6 +14,7 @@ fn forward_beam(
     let continuation_state_limit = inputs.options.continuation_state_limit;
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
     let factor_map_guidance_limit = continuation_state_limit.max(4);
+    let heuristic_reserve_limit = inputs.options.heuristic_reserve_limit;
     let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
     let symmetric_message_limit = inputs.options.symmetric_message_limit;
     let symmetric_state_limit = inputs.options.symmetric_state_limit;
@@ -24,6 +25,7 @@ fn forward_beam(
     let factor_map_ranked = &mut scratch.factor_map_ranked;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
+    let active_trace = &mut scratch.active_trace;
     let candidate_inputs = CandidateInputs {
         graph,
         destinations,
@@ -74,6 +76,7 @@ fn forward_beam(
             } else {
                 Some(nodes[parent.parent.expect("non-root forward parent")].zone)
             };
+            let mut used_factor_map = false;
             let mut candidate_zones = match (inputs.options.candidate_strategy, guidance_suffix) {
                 (CandidateStrategy::Surface, Some(suffix_index)) if unassigned => {
                     let surface_started = profile.then(Instant::now);
@@ -99,6 +102,7 @@ fn forward_beam(
                             CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
                         ) =>
                 {
+                    used_factor_map = true;
                     let map_started = profile.then(Instant::now);
                     let factor_suffixes = if backward.frontiers[layer + 1].is_empty() {
                         guidance_suffixes
@@ -190,6 +194,23 @@ fn forward_beam(
                     }
                 }
             }
+            if used_factor_map && heuristic_reserve_limit > 0 {
+                let heuristic_zones = candidates(candidate_inputs, query, candidate_cache)?;
+                let agreement = candidate_zones
+                    .iter()
+                    .filter(|zone| heuristic_zones.contains(zone))
+                    .count();
+                if agreement < heuristic_reserve_limit {
+                    let reserve = heuristic_zones
+                        .into_iter()
+                        .filter(|zone| !candidate_zones.contains(zone))
+                        .take(heuristic_reserve_limit)
+                        .collect::<Vec<_>>();
+                    report.heuristic_reserve_triggers += 1;
+                    report.heuristic_reserve_proposals += reserve.len() as u64;
+                    candidate_zones.extend(reserve);
+                }
+            }
             let proposal_guidance_started = profile.then(Instant::now);
             if candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none()) {
                 if let Some(suffix_frontier) = backward.guidance_frontiers.get(layer + 1) {
@@ -210,6 +231,10 @@ fn forward_beam(
             }
             candidate_zones.sort_unstable();
             candidate_zones.dedup();
+            if let Some(trace) = active_trace.as_mut() {
+                trace.proposed(layer, &candidate_zones);
+                trace.prefix_proposed(layer, &nodes, parent_index, &candidate_zones);
+            }
             if let Some(started) = proposal_guidance_started {
                 report.continuation_guidance_ns += started.elapsed().as_nanos() as u64;
             }
@@ -340,6 +365,12 @@ fn forward_beam(
                 if !selected.contains(&index) {
                     selected.push(index);
                 }
+            }
+        }
+        if let Some(trace) = active_trace.as_mut() {
+            for &index in &selected {
+                trace.retained(layer, children[index].1);
+                trace.prefix_retained(layer, &nodes, children[index].0, children[index].1);
             }
         }
         frontier = selected

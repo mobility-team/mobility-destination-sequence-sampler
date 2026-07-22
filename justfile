@@ -41,6 +41,14 @@ compare-refresh: build-release
 benchmark-throughput: build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_bidirectional_grand_geneve --contexts 1000 --threads 8 --profile; exit $LASTEXITCODE
 
+# Returned top-100 concentration; all mass is conditional on returned support.
+diagnose-returned-distribution contexts='1000': build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.diagnose_returned_distribution --contexts {{contexts}} --top-k 100 --frontier-width 128 --threads 8; exit $LASTEXITCODE
+
+# Compare the flattest returned top-100 supports against concentrated controls.
+analyze-flat-support contexts='1000' cases='5': build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.analyze_flat_returned_support --contexts {{contexts}} --cases {{cases}} --top-k 100 --frontier-width 128 --threads 8; exit $LASTEXITCODE
+
 # Compare the main symmetric quality/runtime knobs in one prepared process.
 sweep-symmetric: build-fast
     @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --contexts 50 --candidate-contexts 300 --top-k 10 --oracle-depth 100 --max-states 2000000 --compact --symmetric-config p8:4:4:8 --symmetric-config p12:4:4:12 --symmetric-config p16:4:4:16 --symmetric-config m8:8:4:8; exit $LASTEXITCODE

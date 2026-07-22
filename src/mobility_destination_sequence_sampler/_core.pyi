@@ -20,6 +20,15 @@ class TopKReport(TypedDict):
     factor_map_current_builds: int
     factor_map_next_hits: int
     factor_map_next_builds: int
+    factor_map_previous_destination_scans: int
+    factor_map_current_destination_scans: int
+    factor_map_next_destination_scans: int
+    factor_map_previous_feasible_entries: int
+    factor_map_current_feasible_entries: int
+    factor_map_next_feasible_entries: int
+    reverse_prefix_partial_calls: int
+    local_score_cache_hits: int
+    local_score_cache_builds: int
     continuation_proposals: int
     seam_refresh_proposals: int
     seam_refresh_states: int
@@ -82,10 +91,13 @@ class DestinationPlanSearch:
         continuation_state_limit: int = 1,
         continuation_proposal_limit: int = 1,
         seam_refresh_per_prefix: int = 1,
+        heuristic_reserve_limit: int = 0,
         top_k: int = 10,
         n_threads: int | None = None,
         skip_infeasible: bool = False,
         collect_profile: bool = False,
+        active_trace_context_id: int | None = None,
+        active_trace_target_plans: list[list[int]] | None = None,
     ) -> tuple[Any, TopKReport]: ...
 
     def exact_top_k(
@@ -101,3 +113,14 @@ class DestinationPlanSearch:
         n_threads: int | None = None,
         skip_infeasible: bool = False,
     ) -> tuple[Any, ExactTopKReport]: ...
+
+    def exact_distribution(
+        self,
+        *,
+        steps: Any,
+        initial_locations: Any,
+        logit_scale: float,
+        update_plan_timings: bool,
+        use_shadow_prices: bool,
+        max_assignments: int = 100_000,
+    ) -> dict[str, Any]: ...

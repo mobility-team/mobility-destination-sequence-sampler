@@ -21,6 +21,8 @@ fn next_factor_map<'a>(
     cache: &'a mut HashMap<(usize, usize, Option<usize>), FactorScoreMap>,
     hits: &mut u64,
     builds: &mut u64,
+    destination_scans: &mut u64,
+    feasible_entries: &mut u64,
 ) -> &'a FactorScoreMap {
     match cache.entry((request.layer + 1, request.next_zone, request.next_next_zone)) {
         Entry::Occupied(entry) => {
@@ -29,10 +31,11 @@ fn next_factor_map<'a>(
         }
         Entry::Vacant(entry) => {
             *builds += 1;
-            entry.insert({
+            *destination_scans += request.domain.len() as u64;
+            let map = {
                 let next_outbound = request
                     .next_next_zone
-                    .and_then(|zone| inputs.graph.edge_to(request.next_zone, zone));
+                    .and_then(|zone| inputs.graph.factor_edge_from(request.next_zone, zone));
                 let next_departure = next_outbound.and_then(|edge| {
                     inputs
                         .context
@@ -42,13 +45,11 @@ fn next_factor_map<'a>(
                             adjusted_times(*step, edge).map(|(departure, _)| departure)
                         })
                 });
-                let mut map = FactorScoreMap {
-                    entries: Vec::with_capacity(request.domain.len()),
-                };
+                let mut map = FactorScoreMap::with_capacity(request.domain.len());
                 for (position, &destination) in request.domain.iter().enumerate() {
                     let score = inputs
                         .graph
-                        .edge_to(destination, request.next_zone)
+                        .factor_edge_to(destination, request.next_zone)
                         .and_then(|inbound| {
                             let (_, arrival) =
                                 adjusted_times(inputs.context.steps[request.layer + 1], inbound)?;
@@ -62,11 +63,13 @@ fn next_factor_map<'a>(
                             )
                         });
                     if let Some(score) = score {
-                        map.entries.push((position, score));
+                        map.push(position, score);
                     }
                 }
                 map
-            })
+            };
+            *feasible_entries += map.len() as u64;
+            entry.insert(map)
         }
     }
 }
@@ -109,9 +112,20 @@ fn reverse_prefix_partial_score(
                 }
             })
     };
+    let factor_is_exactly_scored = |factor_layer: usize| {
+        known_destination(factor_layer).is_some()
+            && (factor_layer == 0 || known_destination(factor_layer - 1).is_some())
+            && (factor_layer + 1 == inputs.context.steps.len()
+                && inputs.context.steps[factor_layer]
+                    .fixed_destination
+                    .is_some()
+                || known_destination(factor_layer + 1).is_some())
+    };
     let mut score = 0.0;
-    let mut exactly_scored = vec![false; layer + 1];
-    for (factor_layer, exactly_scored) in exactly_scored.iter_mut().enumerate() {
+    for factor_layer in 0..=layer {
+        if !factor_is_exactly_scored(factor_layer) {
+            continue;
+        }
         let Some(factor_destination) = known_destination(factor_layer) else {
             continue;
         };
@@ -142,9 +156,8 @@ fn reverse_prefix_partial_score(
             factor_destination,
             next_destination,
         )?;
-        *exactly_scored = true;
     }
-    if !exactly_scored[0] {
+    if !factor_is_exactly_scored(0) {
         if let Some(first_destination) = known_destination(0) {
             score += initial_endpoint_score(
                 inputs.graph,
@@ -155,8 +168,8 @@ fn reverse_prefix_partial_score(
             )?;
         }
     }
-    for (known_layer, &exactly_scored) in exactly_scored.iter().enumerate().skip(1) {
-        if exactly_scored || !inputs.problem.is_first_choice(known_layer) {
+    for known_layer in 1..=layer {
+        if factor_is_exactly_scored(known_layer) || !inputs.problem.is_first_choice(known_layer) {
             continue;
         }
         let Some(known_destination) = known_destination(known_layer) else {
@@ -210,9 +223,13 @@ fn reverse_factor_map_candidates(
         &mut maps.next,
         &mut maps.next_hits,
         &mut maps.next_builds,
+        &mut maps.next_destination_scans,
+        &mut maps.next_feasible_entries,
     );
+    maps.reverse_prefix_partial_calls += map.len() as u64;
     ranked.clear();
-    ranked.extend(map.entries.iter().filter_map(|&(position, score)| {
+    ranked.extend((0..map.len()).filter_map(|index| {
+        let (position, score) = map.entry(index);
         let destination = domain[position];
         reverse_prefix_partial_score(
             inputs,
@@ -278,18 +295,17 @@ fn factor_map_candidates(
             }
             Entry::Vacant(entry) => {
                 maps.previous_builds += 1;
-                entry.insert({
-                    let inbound = inputs.graph.edge_to(previous_zone, request.origin);
+                maps.previous_destination_scans += domain.len() as u64;
+                let map = {
+                    let inbound = inputs.graph.factor_edge_from(previous_zone, request.origin);
                     let arrival = inbound.and_then(|edge| {
                         adjusted_times(inputs.context.steps[request.layer - 1], edge)
                             .map(|(_, arrival)| arrival)
                     });
-                    let mut map = FactorScoreMap {
-                        entries: Vec::with_capacity(domain.len()),
-                    };
+                    let mut map = FactorScoreMap::with_capacity(domain.len());
                     for (position, &destination) in domain.iter().enumerate() {
                         let score = inbound.and_then(|inbound| {
-                            let outbound = inputs.graph.edge_to(request.origin, destination)?;
+                            let outbound = inputs.graph.factor_edge_from(request.origin, destination)?;
                             let next_departure = if inputs.parameters.update_plan_timings {
                                 Some(
                                     adjusted_times(inputs.context.steps[request.layer], outbound)?
@@ -308,11 +324,13 @@ fn factor_map_candidates(
                             )
                         });
                         if let Some(score) = score {
-                            map.entries.push((position, score));
+                            map.push(position, score);
                         }
                     }
                     map
-                })
+                };
+                maps.previous_feasible_entries += map.len() as u64;
+                entry.insert(map)
             }
         };
         &*map
@@ -343,14 +361,13 @@ fn factor_map_candidates(
                 }
                 Entry::Vacant(entry) => {
                     maps.current_builds += 1;
-                    entry.insert({
-                        let mut map = FactorScoreMap {
-                            entries: Vec::with_capacity(domain.len()),
-                        };
+                    maps.current_destination_scans += domain.len() as u64;
+                    let map = {
+                        let mut map = FactorScoreMap::with_capacity(domain.len());
                         for (position, &destination) in domain.iter().enumerate() {
-                            let score = inputs.graph.edge_to(request.origin, destination).and_then(
+                            let score = inputs.graph.factor_edge_from(request.origin, destination).and_then(
                                 |inbound| {
-                                    inputs.graph.edge_to(destination, next_zone).and_then(
+                                    inputs.graph.factor_edge_to(destination, next_zone).and_then(
                                         |outbound| {
                                             score_local_weight_edges(
                                                 inputs.scoring(),
@@ -364,11 +381,13 @@ fn factor_map_candidates(
                                 },
                             );
                             if let Some(score) = score {
-                                map.entries.push((position, score));
+                                map.push(position, score);
                             }
                         }
                         map
-                    })
+                    };
+                    maps.current_feasible_entries += map.len() as u64;
+                    entry.insert(map)
                 }
             };
         let next_map = next_factor_map(
@@ -382,24 +401,26 @@ fn factor_map_candidates(
             &mut maps.next,
             &mut maps.next_hits,
             &mut maps.next_builds,
+            &mut maps.next_destination_scans,
+            &mut maps.next_feasible_entries,
         );
         ranked.clear();
         let mut current_index = 0;
         let mut next_index = 0;
         let mut previous_index = 0;
-        while current_index < current_map.entries.len() && next_index < next_map.entries.len() {
-            let current_position = current_map.entries[current_index].0;
-            let next_position = next_map.entries[next_index].0;
+        while current_index < current_map.len() && next_index < next_map.len() {
+            let current_position = current_map.entry(current_index).0;
+            let next_position = next_map.entry(next_index).0;
             let mut position = current_position.max(next_position);
             if let Some(previous_map) = previous_map {
-                if previous_index == previous_map.entries.len() {
+                if previous_index == previous_map.len() {
                     break;
                 }
-                position = position.max(previous_map.entries[previous_index].0);
+                position = position.max(previous_map.entry(previous_index).0);
             }
-            let current = current_map.entries[current_index];
-            let next = next_map.entries[next_index];
-            let previous = previous_map.map(|map| map.entries[previous_index]);
+            let current = current_map.entry(current_index);
+            let next = next_map.entry(next_index);
+            let previous = previous_map.map(|map| map.entry(previous_index));
             if current.0 != position
                 || next.0 != position
                 || previous.is_some_and(|value| value.0 != position)
