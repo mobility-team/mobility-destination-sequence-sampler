@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import inspect
+
 import polars as pl
 import pytest
 
+from experiments.top_k_config import ACTIVE_TOP_K_DEFAULTS
 from mobility_destination_sequence_sampler import DestinationPlanSearch
 
 from conftest import build_toy_inputs
@@ -20,6 +23,13 @@ def reference_steps() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.Data
         od_costs,
         destination_inputs,
     )
+
+
+def test_shared_experiment_defaults_match_the_live_top_k_signature() -> None:
+    parameters = inspect.signature(DestinationPlanSearch.top_k).parameters
+    assert {
+        name: parameters[name].default for name in ACTIVE_TOP_K_DEFAULTS
+    } == ACTIVE_TOP_K_DEFAULTS
 
 
 def test_two_step_top_k_matches_the_exact_oracle() -> None:
