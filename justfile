@@ -75,3 +75,7 @@ sweep-symmetric: build-fast
 # Run the fixed difficult/regression contexts with cached exact oracles.
 canary-quality: build-fast
     @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --top-k 10 --oracle-depth 100 --max-states 2000000 --compact --context-id 26 --context-id 45331 --context-id 3647 --context-id 2679 --context-id 61440 --context-id 3506 --context-id 57725 --context-id 61662; exit $LASTEXITCODE
+
+# Run bounded and exact calls locally, returning only a compact JSON report.
+code-mode-probe context_id='26': build-release
+    @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.code_mode_probe --context-id {{context_id}}; exit $LASTEXITCODE
