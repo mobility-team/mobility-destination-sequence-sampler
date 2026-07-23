@@ -63,6 +63,11 @@ impl CandidateStrategy {
             )),
         }
     }
+
+    #[inline]
+    pub(crate) fn uses_factor_maps(self) -> bool {
+        matches!(self, Self::FactorMap | Self::SymmetricFactorMap)
+    }
 }
 
 struct PrefixNode {

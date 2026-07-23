@@ -103,7 +103,7 @@ class DestinationPlanSearch:
         symmetric_forward_proposal_limit: int = 20,
         candidate_strategy: CandidateStrategy = "symmetric_factor_map",
         surface_bins: int = 2,
-        factor_map_max_depth: int = 5,
+        factor_map_max_depth: int = 99,
         stitch_bias: int = 1,
         continuation_state_limit: int = 1,
         deep_continuation_state_limit: int = 16,

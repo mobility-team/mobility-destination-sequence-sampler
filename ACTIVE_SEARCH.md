@@ -13,8 +13,11 @@ or raises when its state budget is exhausted. It is never a production
 fallback.
 
 The default policy is `symmetric_factor_map`. It uses exact, unbinned local
-factor maps through `factor_map_max_depth=5`; longer contexts use the bounded
-heuristic proposal pool. A two-step context is a direct exact scan.
+factor maps when every home-bounded tour is at most
+`factor_map_max_depth=99`; a longer uninterrupted tour uses the bounded
+heuristic proposal pool. Fixed home returns remain part of the full scorer and
+do not make tours independently solvable. A two-step context is a direct exact
+scan.
 
 ## One-context flow
 
@@ -59,6 +62,11 @@ messages may decide which states survive. They never replace the exact local
 scorer for a retained factor. The primary backward frontier must survive seam
 refresh; refresh only adds boundary states.
 
+Factor-map policies use destination-resolution maps in both the forward and
+reverse proposal passes. A fixed home destination is therefore a map boundary,
+not a legacy-candidate fallback; its crossing local factor remains owned and
+scored exactly by the relevant beam.
+
 ## Read only what the task needs
 
 | Task | First files | Usually avoid |
@@ -82,7 +90,7 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 | `frontier_width` | 40 | all | retained states on the main beams |
 | `proposal_limit_per_source` | 16 | all | proposal support per retained source |
 | `candidate_strategy` | `symmetric_factor_map` | all | `heuristic`, `surface`, `factor_map`, or active symmetric policy |
-| `factor_map_max_depth` | 5 | factor-map policies | deeper contexts fall back to heuristic support |
+| `factor_map_max_depth` | 99 | factor-map policies | longest home-bounded tour allowed before falling back to heuristic support |
 | `symmetric_message_limit` | 4 | symmetric only | partial reverse messages; zero disables that channel |
 | `symmetric_state_limit` | 4 | symmetric only | retained partial reverse states away from the seam |
 | `symmetric_forward_proposal_limit` | 20 | symmetric only | total compact partial-message proposals handed forward |

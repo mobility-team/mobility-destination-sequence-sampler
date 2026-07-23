@@ -3,7 +3,7 @@
 Release build, Windows, Grand Geneve iteration-5 cache, 2026-07-22. These are
 kernel measurements, not end-to-end Mobility timings.
 
-## Active bounded top-K
+## Prior depth-5 bounded top-K baseline
 
 Full prepared Grand Geneve workload (81,844 contexts, 328,197 steps, 1,110
 zones), eight threads; `frontier_width=40`, `proposal_limit_per_source=16`,
@@ -14,19 +14,26 @@ zones), eight threads; `frontier_width=40`, `proposal_limit_per_source=16`,
 
 | Policy | Wall time | Complete | Infeasible |
 |---|---:|---:|---:|
-| Symmetric factor map, depth <=5 (default) | 22.35 s | 70,801 | 11,043 |
+| Symmetric factor map, depth <=5 | 22.35 s | 70,801 | 11,043 |
 | Asymmetric factor map | 16.30 s | 70,335 | 11,509 |
 | Binned surface comparator | 8.785 s | 70,143 | 11,701 |
 | Heuristic comparator | 6.591 s | 70,351 | 11,493 |
 
-The default remains within the 30-second target. Across five deterministic
+This was the 2026-07-22 default and remains a useful comparison point. Across five deterministic
 50-context exact cohorts, the default scores mean `Mass@10` 0.892 and
 `Recall@10` 0.884. The previous compact partial-proposal budget of 8 scored
 0.853/0.830; 20 is the measured quality/runtime knee (24 reaches 0.894).
 Known-prefix factor scoring and compact repeated-anchor handoff account for
 the gain. Exact-oracle results are cached by immutable-input/scorer fingerprint.
-Older throughput and
-quality measurements are experiment history, not the active baseline.
+The current default uses `factor_map_max_depth=99` and factor-map support on
+the primary reverse path. In the full 81,844-context interleaved comparison,
+it ran in 39.644 s wall / 233.138 s aggregate Rust; the matched depth-5
+setting took 47.978 s / 292.763 s (+21.0% / +25.6%). Outputs and counters
+differ, so this is a policy comparison rather than a pure performance gate;
+the depth setting also controls deep-continuation width. See
+[`experiments/active-bidirectional-top-k.md`](experiments/active-bidirectional-top-k.md)
+for the current decision record. Older throughput and quality measurements are
+experiment history, not the active baseline.
 
 ## Earlier bounded top-K reference
 

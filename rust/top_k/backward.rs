@@ -13,6 +13,8 @@ pub(super) fn backward_beam(
     let anchor_slots = &inputs.anchor_slots;
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
+    let factor_map_cache = &mut scratch.factor_map_cache;
+    let factor_map_ranked = &mut scratch.factor_map_ranked;
     let local_scores = &mut scratch.local_scores;
     let report = &mut scratch.report;
     let active_trace = &mut scratch.active_trace;
@@ -25,6 +27,7 @@ pub(super) fn backward_beam(
         surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
+    let use_factor_maps = inputs.options.candidate_strategy.uses_factor_maps();
     let started = profile.then(Instant::now);
     let terminal = context.steps.last().expect("context has steps");
     let terminal_zone = terminal.fixed_destination.ok_or_else(|| {
@@ -64,7 +67,37 @@ pub(super) fn backward_beam(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| nodes[index].zone);
-            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
+            let reverse_candidates = if use_factor_maps {
+                let map_started = profile.then(Instant::now);
+                if context.steps[layer].fixed_destination.is_none()
+                    && query
+                        .anchor_slot
+                        .is_none_or(|slot| query.anchors[slot].is_none())
+                {
+                    report.factor_map_destination_evaluations += destinations
+                        .domain(context.steps[layer].activity_id)
+                        .map_or(0, |domain| domain.len() as u64);
+                }
+                let result = reverse_factor_map_candidates(
+                    inputs,
+                    ReverseFactorMapRequest {
+                        layer,
+                        next_zone,
+                        next_next_zone,
+                        anchor_slot: query.anchor_slot,
+                        anchors: query.anchors,
+                        candidate_limit: candidate_count.saturating_mul(2),
+                    },
+                    factor_map_cache,
+                    factor_map_ranked,
+                )?;
+                if let Some(started) = map_started {
+                    report.factor_map_ns += started.elapsed().as_nanos() as u64;
+                }
+                result
+            } else {
+                candidates(candidate_inputs, query, candidate_cache)?
+            };
             if let Some(trace) = active_trace.as_mut() {
                 trace.proposed(layer, &reverse_candidates);
             }
@@ -156,12 +189,7 @@ pub(super) fn extend_backward_guidance(
     };
     let guidance_width = match mode {
         BackwardGuidanceMode::Partial => inputs.options.symmetric_message_limit,
-        BackwardGuidanceMode::Exact
-            if matches!(
-                inputs.options.candidate_strategy,
-                CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
-            ) =>
-        {
+        BackwardGuidanceMode::Exact if inputs.options.candidate_strategy.uses_factor_maps() => {
             continuation_state_limit.max(4)
         }
         BackwardGuidanceMode::Exact => continuation_state_limit,
@@ -242,7 +270,9 @@ pub(super) fn extend_backward_guidance(
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
-            let reverse_candidates = if mode == BackwardGuidanceMode::Partial {
+            let use_factor_maps = mode == BackwardGuidanceMode::Partial
+                || inputs.options.candidate_strategy.uses_factor_maps();
+            let reverse_candidates = if use_factor_maps {
                 let map_started = profile.then(Instant::now);
                 if context.steps[layer].fixed_destination.is_none()
                     && query

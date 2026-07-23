@@ -182,10 +182,23 @@ pub(super) fn search_context_once(
     }
     let build_started = options.profile.then(Instant::now);
     let problem = build_scoring_problem(context)?;
+    // A fixed return to the initial home zone bounds a tour. Factor-map
+    // guidance remains valid across the boundary (and anchors may still cross
+    // it), but a day made of short home-bounded tours should not be downgraded
+    // to the legacy proposal pool merely because its total row count is long.
+    let mut home_bounded_depth = 0;
+    let mut tour_start = 0;
+    for (layer, step) in context.steps.iter().enumerate() {
+        if step.fixed_destination == Some(context.initial_zone) {
+            home_bounded_depth = home_bounded_depth.max(layer + 1 - tour_start);
+            tour_start = layer + 1;
+        }
+    }
+    home_bounded_depth = home_bounded_depth.max(context.steps.len() - tour_start);
     let use_heuristic = match options.candidate_strategy {
         CandidateStrategy::Surface => context.steps.len() > 4,
         CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap => {
-            context.steps.len() > options.factor_map_max_depth
+            home_bounded_depth > options.factor_map_max_depth
         }
         CandidateStrategy::Heuristic => false,
     };

@@ -14,7 +14,7 @@ ACTIVE_TOP_K_DEFAULTS = {
     "symmetric_forward_proposal_limit": 20,
     "candidate_strategy": "symmetric_factor_map",
     "surface_bins": 2,
-    "factor_map_max_depth": 5,
+    "factor_map_max_depth": 99,
     "stitch_bias": 1,
     "continuation_state_limit": 1,
     "deep_continuation_state_limit": 16,
@@ -64,6 +64,7 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         "--factor-map-max-depth",
         type=int,
         default=ACTIVE_TOP_K_DEFAULTS["factor_map_max_depth"],
+        help="maximum home-bounded tour depth for factor-map support",
     )
     parser.add_argument("--stitch-bias", type=int, default=ACTIVE_TOP_K_DEFAULTS["stitch_bias"])
     parser.add_argument(

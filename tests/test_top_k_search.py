@@ -337,6 +337,79 @@ def test_bidirectional_top_k_matches_exact_when_the_beam_covers_the_toy_domain()
     assert plans(bounded) == plans(exact)
 
 
+def test_home_bounded_factor_maps_keep_a_cross_home_anchor() -> None:
+    zones = [0, 1, 2]
+    od_costs = pl.DataFrame(
+        {
+            "origin": [origin for origin in zones for _ in zones],
+            "destination": [destination for _ in zones for destination in zones],
+            "cost": [0.2 * abs(origin - destination) for origin in zones for destination in zones],
+            "time": [0.1 * abs(origin - destination) for origin in zones for destination in zones],
+        }
+    )
+    destination_inputs = pl.DataFrame(
+        {
+            "activity_id": [10, 10],
+            "destination": [1, 2],
+            "opportunity_capacity": [2.0, 1.0],
+            "country_value_coefficient": [1.0, 1.0],
+            "saturation_utility": [1.0, 1.0],
+            "shadow_price": [0.0, 0.0],
+        }
+    )
+    steps = pl.DataFrame(
+        {
+            "context_id": [1] * 6,
+            "layer": list(range(6)),
+            "activity_id": [10, 10, 0, 10, 10, 0],
+            "anchor_id": [91, None, None, 91, None, None],
+            "fixed_destination": [None, None, 0, None, None, 0],
+            "departure_time": [8.0, 10.0, 12.0, 14.0, 16.0, 18.0],
+            "arrival_time": [8.5, 10.5, 12.5, 14.5, 16.5, 18.5],
+            "arrival_time_rigidity": [0.5, 0.5, 0.0, 0.5, 0.5, 0.0],
+            "departure_time_rigidity": [0.5] * 6,
+            "next_departure_time": [10.0, 12.0, 14.0, 16.0, 18.0, 19.0],
+            "duration_per_person": [2.0] * 5 + [0.0],
+            "value_of_time": [1.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+            "mean_duration_per_person": [1.0] * 6,
+            "min_activity_time": [0.5] * 6,
+        }
+    )
+    initial_locations = pl.DataFrame({"context_id": [1], "initial_zone": [0]})
+    search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
+    common = {
+        "steps": steps,
+        "initial_locations": initial_locations,
+        "logit_scale": 1.0,
+        "update_plan_timings": True,
+        "use_shadow_prices": False,
+        "top_k": 8,
+    }
+
+    bounded, report = search.top_k(
+        **common,
+        exploration_seed=13,
+        frontier_width=8,
+        proposal_limit_per_source=8,
+        candidate_strategy="symmetric_factor_map",
+        factor_map_max_depth=3,
+        seam_refresh_per_prefix=0,
+    )
+    exact, _ = search.exact_top_k(**common, max_states=100)
+
+    def plans(frame: pl.DataFrame) -> list[tuple[int, ...]]:
+        return [
+            tuple(plan.sort("layer")["destination"].to_list())
+            for plan in frame.partition_by("draw_id", maintain_order=True)
+        ]
+
+    assert plans(bounded) == plans(exact)
+    assert report["factor_map_destinations_evaluated"] > 0
+    for plan in plans(bounded):
+        assert plan[2] == plan[5] == 0
+        assert plan[0] == plan[3]
+
+
 def test_exact_oracle_fails_explicitly_at_its_state_budget() -> None:
     steps, initial_locations, od_costs, destination_inputs = reference_steps()
     search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
