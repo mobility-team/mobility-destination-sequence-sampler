@@ -14,7 +14,10 @@ import polars as pl
 
 from mobility_destination_sequence_sampler import DestinationPlanSearch
 
-from experiments.benchmarks.perf_bidirectional_grand_geneve import eligible_contexts
+from experiments.benchmarks.perf_bidirectional_grand_geneve import (
+    calibrated_contexts,
+    eligible_contexts,
+)
 from experiments.benchmarks.perf_grand_geneve_cache import (
     DEFAULT_GROUP_DAY_TRIPS_FOLDER,
     LOGIT_SCALE,
@@ -100,57 +103,6 @@ def output_fingerprint(table: pl.DataFrame) -> str:
         digest.update(repr(row).encode())
         digest.update(b"\n")
     return digest.hexdigest()[:16]
-
-
-def calibrated_contexts(steps: pl.DataFrame, count: int, seed: int) -> pl.DataFrame:
-    """Proportionally sample depth/variable-anchor strata for performance gates."""
-    if count <= 0:
-        raise ValueError("--contexts must be positive")
-    profiles = (
-        steps.group_by("context_id")
-        .agg(
-            layers=pl.len(),
-            variable_anchors=(
-                pl.col("fixed_destination").is_null()
-                & pl.col("anchor_id").is_not_null()
-            ).sum(),
-        )
-        .filter(pl.col("layers") >= 2)
-        .with_columns(
-            depth_band=pl.when(pl.col("layers") >= 10)
-            .then(pl.lit("10+"))
-            .otherwise(pl.col("layers").cast(pl.String)),
-            anchor_band=pl.when(pl.col("variable_anchors") > 0)
-            .then(pl.lit("variable-anchor"))
-            .otherwise(pl.lit("fixed-only")),
-        )
-        .with_columns(stratum=pl.concat_str(["depth_band", "anchor_band"], separator="|"))
-    )
-    populations = {
-        stratum: int(population)
-        for stratum, population in profiles.group_by("stratum").len().iter_rows()
-    }
-    if count > sum(populations.values()):
-        raise ValueError("--contexts exceeds the supported calibration population")
-    raw = {stratum: count * population / sum(populations.values()) for stratum, population in populations.items()}
-    quotas = {stratum: min(populations[stratum], int(value)) for stratum, value in raw.items()}
-    for stratum in sorted(populations, key=lambda item: (raw[item] - quotas[item], item), reverse=True):
-        if sum(quotas.values()) == count:
-            break
-        if quotas[stratum] < populations[stratum]:
-            quotas[stratum] += 1
-    selected = []
-    for stratum, quota in quotas.items():
-        if not quota:
-            continue
-        selected.extend(
-            profiles.filter(pl.col("stratum") == stratum)
-            .with_columns(sample_order=pl.col("context_id").hash(seed=seed))
-            .sort("sample_order")
-            .head(quota)["context_id"]
-            .to_list()
-        )
-    return pl.DataFrame({"context_id": selected})
 
 
 COUNTERS = (

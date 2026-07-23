@@ -7,7 +7,8 @@
 | Default bounded quality against proof | `just compare-quality` | Recall@10 and Mass@10 |
 | Deep primary-quality coverage | `just audit-deep-top-k` | all-depth stratified exact top-10 audit and oracle-cap diagnostics |
 | Output-size behavior | `just compare-k-sweep-seeds` | Recall/Mass across K against top-500 support |
-| Whole-workload budget | `just benchmark-throughput` | wall time, complete/infeasible contexts, profile counts |
+| Representative throughput smoke | `just benchmark-throughput` | 1,000 depth/anchor-calibrated contexts; wall time and profile counts |
+| Fixed-only throughput smoke | `just benchmark-throughput-fixed-only` | anchor-independent regression signal |
 | Pure performance hypothesis | `just compare-throughput` | interleaved A/B/A medians, fingerprint, and counter gate |
 | Returned-support concentration | `just diagnose-returned-distribution` | conditional mass@10/20/50 within returned top-100 |
 | Symmetric tuning | `just sweep-symmetric` | compact comparison of message/state/proposal widths |
@@ -60,7 +61,8 @@ new preset in `BENCHMARKS.md` before calling it a new baseline.
 ## Performance experiment gate
 
 Use `just compare-throughput` for a pure bounded-search performance hypothesis.
-It prepares a fixed depth/variable-anchor-stratified cohort once and runs
+It uses the same depth/variable-anchor stratification as the representative
+throughput smoke and runs
 `A B A B A` in one process. A candidate is promotable only when output
 fingerprints and work counters agree and its median aggregate Rust search time
 improves by at least 3%. Confirm a promoted candidate with

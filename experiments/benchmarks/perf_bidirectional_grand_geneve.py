@@ -1,8 +1,4 @@
-"""Read-only raw-zone timing for the bidirectional top-K search.
-
-This benchmark selects final-home contexts without variable anchors to
-measure bounded top-K search cost using fixed candidate parameters.
-"""
+"""Read-only raw-zone timing for the bidirectional top-K search."""
 
 from __future__ import annotations
 
@@ -33,10 +29,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_GROUP_DAY_TRIPS_FOLDER,
     )
     parser.add_argument("--contexts", type=int, default=1_000)
-    parser.add_argument(
+    sample_mode = parser.add_mutually_exclusive_group()
+    sample_mode.add_argument(
         "--all-supported",
         action="store_true",
         help="time every prepared depth>=2 context, including variable anchors",
+    )
+    sample_mode.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="sample depth and variable-anchor strata in workload proportions",
     )
     parser.add_argument("--top-k", type=int, default=10)
     add_top_k_tuning_arguments(parser)
@@ -83,6 +85,68 @@ def eligible_contexts(
     return eligible
 
 
+def calibrated_contexts(steps: pl.DataFrame, count: int, seed: int) -> pl.DataFrame:
+    """Sample all depth/variable-anchor strata in workload proportions."""
+    if count <= 0:
+        raise ValueError("--contexts must be positive")
+    profiles = (
+        steps.group_by("context_id")
+        .agg(
+            layers=pl.len(),
+            variable_anchors=(
+                pl.col("fixed_destination").is_null()
+                & pl.col("anchor_id").is_not_null()
+            ).sum(),
+        )
+        .filter(pl.col("layers") >= 2)
+        .with_columns(
+            depth_band=pl.when(pl.col("layers") >= 10)
+            .then(pl.lit("10+"))
+            .otherwise(pl.col("layers").cast(pl.String)),
+            anchor_band=pl.when(pl.col("variable_anchors") > 0)
+            .then(pl.lit("variable-anchor"))
+            .otherwise(pl.lit("fixed-only")),
+        )
+        .with_columns(stratum=pl.concat_str(["depth_band", "anchor_band"], separator="|"))
+    )
+    populations = {
+        stratum: int(population)
+        for stratum, population in profiles.group_by("stratum").len().iter_rows()
+    }
+    if count > sum(populations.values()):
+        raise ValueError("--contexts exceeds the supported calibration population")
+    total_population = sum(populations.values())
+    raw = {
+        stratum: count * population / total_population
+        for stratum, population in populations.items()
+    }
+    quotas = {
+        stratum: min(populations[stratum], int(value))
+        for stratum, value in raw.items()
+    }
+    for stratum in sorted(
+        populations,
+        key=lambda item: (raw[item] - quotas[item], item),
+        reverse=True,
+    ):
+        if sum(quotas.values()) == count:
+            break
+        if quotas[stratum] < populations[stratum]:
+            quotas[stratum] += 1
+    selected = []
+    for stratum, quota in quotas.items():
+        if not quota:
+            continue
+        selected.extend(
+            profiles.filter(pl.col("stratum") == stratum)
+            .with_columns(sample_order=pl.col("context_id").hash(seed=seed))
+            .sort("sample_order")
+            .head(quota)["context_id"]
+            .to_list()
+        )
+    return pl.DataFrame({"context_id": selected})
+
+
 def main() -> None:
     args = parse_args()
     files = resolve_snapshot_files(args.group_day_trips_folder)
@@ -97,9 +161,14 @@ def main() -> None:
         demand_groups_path=files["demand_groups"],
         activity_dur_path=files["activity_dur"],
     )
-    selected = eligible_contexts(
-        steps, args.contexts, args.exploration_seed, args.all_supported
-    )
+    if args.calibrated:
+        selected = calibrated_contexts(steps, args.contexts, args.exploration_seed)
+        sample_name = "calibrated"
+    else:
+        selected = eligible_contexts(
+            steps, args.contexts, args.exploration_seed, args.all_supported
+        )
+        sample_name = "all-supported" if args.all_supported else "fixed-only"
     steps = steps.join(selected, on="context_id", how="semi")
     initial_locations = initial_locations.join(selected, on="context_id", how="semi")
     search = DestinationPlanSearch(
@@ -130,7 +199,8 @@ def main() -> None:
 
     print("\nbounded top-K")
     print(
-        f"workload  contexts={initial_locations.height} steps={steps.height} "
+        f"workload  sample={sample_name} "
+        f"contexts={initial_locations.height} steps={steps.height} "
         f"zones={od_costs['origin'].n_unique()} "
         f"top-k={args.top_k} "
         f"frontier-width={args.frontier_width} "
