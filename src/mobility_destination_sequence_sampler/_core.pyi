@@ -8,6 +8,20 @@ CandidateStrategy = Literal[
 ]
 
 
+class ActiveTraceTargetReport(TypedDict):
+    zones: list[int]
+    proposed: list[bool]
+    retained: list[bool]
+    prefix_proposed: list[bool | None]
+    prefix_retained: list[bool | None]
+    guidance_retained: list[bool]
+    guidance_proposed: list[bool]
+    exact_guidance_rank: list[int | None]
+    exact_guidance_log_gap: list[float | None]
+    prefix_pruned: list[bool | None]
+    pruned: list[bool]
+
+
 class TopKReport(TypedDict):
     contexts: int
     forward_proposals_evaluated: int
@@ -30,6 +44,8 @@ class TopKReport(TypedDict):
     local_score_cache_hits: int
     local_score_cache_builds: int
     continuation_proposals: int
+    heuristic_reserve_triggers: int
+    heuristic_reserve_proposals: int
     seam_refresh_proposals: int
     seam_refresh_states: int
     stitch_pairs: int
@@ -46,6 +62,7 @@ class TopKReport(TypedDict):
     stitch_ns: int
     materialize_ns: int
     total_search_ns: int
+    active_trace_targets: list[ActiveTraceTargetReport]
 
 
 class ExactTopKReport(TypedDict):
