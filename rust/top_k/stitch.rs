@@ -1,4 +1,6 @@
-fn prefix_zones(nodes: &[PrefixNode], mut index: usize) -> Vec<usize> {
+use super::*;
+
+pub(super) fn prefix_zones(nodes: &[PrefixNode], mut index: usize) -> Vec<usize> {
     let mut zones = Vec::new();
     while let Some(parent) = nodes[index].parent {
         zones.push(nodes[index].zone);
@@ -8,7 +10,7 @@ fn prefix_zones(nodes: &[PrefixNode], mut index: usize) -> Vec<usize> {
     zones
 }
 
-fn suffix_zones(nodes: &[SuffixNode], mut index: usize) -> Vec<usize> {
+pub(super) fn suffix_zones(nodes: &[SuffixNode], mut index: usize) -> Vec<usize> {
     let mut zones = Vec::new();
     loop {
         zones.push(nodes[index].zone);
@@ -19,13 +21,18 @@ fn suffix_zones(nodes: &[SuffixNode], mut index: usize) -> Vec<usize> {
     }
 }
 
-struct CompletedPlan {
+pub(super) struct CompletedPlan {
     score: f64,
     prefix: usize,
     suffix: usize,
 }
 
-fn append_plan(output: &mut OutputTable, inputs: &SearchInputs<'_>, zones: &[usize], draw_id: u32) {
+pub(super) fn append_plan(
+    output: &mut OutputTable,
+    inputs: &SearchInputs<'_>,
+    zones: &[usize],
+    draw_id: u32,
+) {
     let Some((_, local_weights)) = score_zones(inputs.scoring(), zones) else {
         return;
     };
@@ -50,7 +57,7 @@ fn append_plan(output: &mut OutputTable, inputs: &SearchInputs<'_>, zones: &[usi
     }
 }
 
-fn search_two_step_context(
+pub(super) fn search_two_step_context(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
 ) -> Result<OutputTable, SamplerError> {
@@ -126,7 +133,7 @@ fn search_two_step_context(
     Ok(output)
 }
 
-fn search_context(
+pub(super) fn search_context(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
@@ -159,7 +166,7 @@ fn search_context(
     }
 }
 
-fn search_context_once(
+pub(super) fn search_context_once(
     graph: &OdGraph,
     destinations: &DestinationIndex,
     context: &Context,
@@ -357,7 +364,9 @@ pub fn search_top_k_all(
     let compute = || {
         contexts
             .par_iter()
-            .map(|context| search_context(graph, destinations, context, parameters, options.clone()))
+            .map(|context| {
+                search_context(graph, destinations, context, parameters, options.clone())
+            })
             .collect::<Vec<_>>()
     };
     let results = if let Some(n_threads) = n_threads {

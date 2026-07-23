@@ -49,6 +49,13 @@ compare-refresh: build-release
 benchmark-throughput: build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_bidirectional_grand_geneve --contexts 1000 --threads 8 --profile; exit $LASTEXITCODE
 
+# Interleaved A/B/A timing for a parameterized bounded-search experiment.
+compare-throughput: build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.compare_bidirectional_throughput --contexts 5000 --calibrated --threads 8 --cycles 2; exit $LASTEXITCODE
+
+compare-throughput-full: build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.compare_bidirectional_throughput --all-supported --contexts 81844 --threads 8 --cycles 2; exit $LASTEXITCODE
+
 # Returned top-100 concentration; all mass is conditional on returned support.
 diagnose-returned-distribution contexts='1000': build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.diagnose_returned_distribution --contexts {{contexts}} --top-k 100 --frontier-width 128 --threads 8; exit $LASTEXITCODE

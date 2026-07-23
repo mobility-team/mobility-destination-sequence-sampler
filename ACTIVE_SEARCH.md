@@ -34,6 +34,11 @@ The implementation entry is `search_top_k_all()` and the per-context
 orchestrator is `search_context()`. Search is parallel only across contexts;
 all caches and mutable search state are per context.
 
+`rust/top_k/mod.rs` owns shared private state; its explicit child modules own
+one search phase each (`factor_maps`, `backward`, `forward`, `refresh`, and
+`stitch`). Keep cross-phase interfaces `pub(super)` and narrow: a phase must
+not reach into another phase's cache implementation directly.
+
 ## State and ownership
 
 `PrefixNode` stores a destination, its parent, known anchor assignments, and
@@ -83,6 +88,8 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 | `symmetric_forward_proposal_limit` | 20 | symmetric only | total compact partial-message proposals handed forward |
 | `surface_bins` | 2 | `surface` only | binned comparator resolution (2 or 4) |
 | `continuation_state_limit` | 1 | all | exact reverse guidance states consulted forward |
+| `deep_continuation_state_limit` | 16 | contexts deeper than `factor_map_max_depth` | wider exact reverse guidance for heuristic-support depths |
+| `continuation_log_gap` | 0.0 | all | additionally retain exact guidance states within this log-utility band; zero preserves fixed-width behavior |
 | `continuation_proposal_limit` | 1 | all | reverse-projection proposals per guidance state |
 | `seam_refresh_per_prefix` | 1 | all | extra suffix states from retained prefixes; never replaces reverse states |
 | `stitch_bias` | 1 | contexts with 3+ steps | shifts the balanced stitch layer |
@@ -92,6 +99,10 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 `surface`, `factor_map`, and `heuristic` are retained comparators. Do not
 change active defaults based on a single context; use the quality harness and
 record the decision in the active experiment note.
+
+The Python experiment defaults live in `experiments/top_k_config.py`; keep
+this table and the PyO3 defaults in `rust/api.rs` synchronized when changing
+the active boundary.
 
 
 The returned output has one row per `(context_id, draw_id, layer)`: `origin`,

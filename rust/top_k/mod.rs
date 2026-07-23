@@ -22,12 +22,25 @@ use crate::scoring::{
     ScoringInputs, ScoringProblem,
 };
 
+mod backward;
 mod candidates;
+mod factor_maps;
+mod forward;
+mod refresh;
+mod stitch;
 
+use backward::{backward_beam, extend_backward_guidance};
 use candidates::{
     candidates, reverse_projection_candidates, surface_candidates, CandidateCache, CandidateInputs,
     CandidateQuery,
 };
+use factor_maps::{
+    factor_map_candidates, reverse_factor_map_candidates, reverse_prefix_partial_score,
+    FactorMapRequest, ReverseFactorMapRequest,
+};
+use forward::forward_beam;
+use refresh::refresh_stitch_frontier;
+pub use stitch::search_top_k_all;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandidateStrategy {
@@ -761,8 +774,3 @@ fn best_continuation_score(
 }
 
 // Search passes are physically separated to keep task-scoped reads small.
-include!("factor_maps.rs");
-include!("forward.rs");
-include!("refresh.rs");
-include!("backward.rs");
-include!("stitch.rs");

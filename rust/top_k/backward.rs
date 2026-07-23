@@ -1,4 +1,6 @@
-fn backward_beam(
+use super::*;
+
+pub(super) fn backward_beam(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
     first_layer: usize,
@@ -137,7 +139,7 @@ fn backward_beam(
     })
 }
 
-fn extend_backward_guidance(
+pub(super) fn extend_backward_guidance(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
     stitch_layer: usize,
@@ -182,29 +184,28 @@ fn extend_backward_guidance(
         exploration_seed: inputs.options.exploration_seed,
     };
     let started = profile.then(Instant::now);
-    let mut frontier = if mode != BackwardGuidanceMode::Exact
-        || inputs.options.continuation_log_gap == 0.0
-    {
-        messages.frontiers[stitch_layer + 1]
-            .iter()
-            .copied()
-            .take(guidance_width)
+    let mut frontier =
+        if mode != BackwardGuidanceMode::Exact || inputs.options.continuation_log_gap == 0.0 {
+            messages.frontiers[stitch_layer + 1]
+                .iter()
+                .copied()
+                .take(guidance_width)
+                .collect::<Vec<_>>()
+        } else {
+            let initial_frontier = &messages.frontiers[stitch_layer + 1];
+            let initial_scores = initial_frontier
+                .iter()
+                .map(|&index| messages.nodes[index].exact_log_weight)
+                .collect::<Vec<_>>();
+            select_guidance_indices(
+                &initial_scores,
+                guidance_width,
+                inputs.options.continuation_log_gap,
+            )
+            .into_iter()
+            .map(|index| initial_frontier[index])
             .collect::<Vec<_>>()
-    } else {
-        let initial_frontier = &messages.frontiers[stitch_layer + 1];
-        let initial_scores = initial_frontier
-            .iter()
-            .map(|&index| messages.nodes[index].exact_log_weight)
-            .collect::<Vec<_>>();
-        select_guidance_indices(
-            &initial_scores,
-            guidance_width,
-            inputs.options.continuation_log_gap,
-        )
-        .into_iter()
-        .map(|index| initial_frontier[index])
-        .collect::<Vec<_>>()
-    };
+        };
     match mode {
         BackwardGuidanceMode::Exact => {
             messages.guidance_frontiers[stitch_layer + 1] = frontier.clone()
@@ -350,11 +351,7 @@ fn extend_backward_guidance(
             .map(|&index| scores[index])
             .collect::<Vec<_>>();
         let selected = if mode == BackwardGuidanceMode::Exact {
-            select_guidance_indices(
-                &scores,
-                layer_width,
-                inputs.options.continuation_log_gap,
-            )
+            select_guidance_indices(&scores, layer_width, inputs.options.continuation_log_gap)
         } else {
             select_beam_indices(&scores, layer_width)
         };

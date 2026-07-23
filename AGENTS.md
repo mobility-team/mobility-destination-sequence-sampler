@@ -21,8 +21,13 @@ without a new, testable hypothesis.
 - `just audit-global-quality [per_stratum] [max_states]` — all-depth weighted oracle-audit pilot; failures remain visible.
 - `just compare-refresh` — 0/1/2/4 refresh quality trade-off.
 - `just benchmark-throughput` — 1,000-context eight-thread runtime profile.
+- `just compare-throughput` — interleaved A/B/A throughput check with output
+  fingerprints; use before promoting a hot-loop change.
 - `just canary-quality` — fixed hard/regression cases in one prepared process.
 - `just sweep-symmetric` — compact in-process symmetric parameter sweep.
+
+Run `just --list` for the complete, current command catalog; the list above
+is the maintained core workflow.
 
 Use `rg` for files/text; use `ast-grep` for syntax-aware Rust/Python search or
 mechanical refactors.

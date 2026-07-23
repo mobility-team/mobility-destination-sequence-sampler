@@ -1,21 +1,23 @@
-struct FactorMapRequest<'a> {
-    layer: usize,
-    previous_zone: Option<usize>,
-    origin: usize,
-    suffixes: &'a [usize],
-    anchor_slot: Option<usize>,
-    anchors: &'a [Option<usize>],
-    candidate_limit: usize,
+use super::*;
+
+pub(super) struct FactorMapRequest<'a> {
+    pub(super) layer: usize,
+    pub(super) previous_zone: Option<usize>,
+    pub(super) origin: usize,
+    pub(super) suffixes: &'a [usize],
+    pub(super) anchor_slot: Option<usize>,
+    pub(super) anchors: &'a [Option<usize>],
+    pub(super) candidate_limit: usize,
 }
 
-struct NextFactorMapRequest<'a> {
+pub(super) struct NextFactorMapRequest<'a> {
     layer: usize,
     domain: &'a [usize],
     next_zone: usize,
     next_next_zone: Option<usize>,
 }
 
-fn next_factor_map<'a>(
+pub(super) fn next_factor_map<'a>(
     inputs: &SearchInputs<'_>,
     request: NextFactorMapRequest<'_>,
     cache: &'a mut HashMap<(usize, usize, Option<usize>), FactorScoreMap>,
@@ -74,20 +76,20 @@ fn next_factor_map<'a>(
     }
 }
 
-struct ReverseFactorMapRequest<'a> {
-    layer: usize,
-    next_zone: usize,
-    next_next_zone: Option<usize>,
-    anchor_slot: Option<usize>,
-    anchors: &'a [Option<usize>],
-    candidate_limit: usize,
+pub(super) struct ReverseFactorMapRequest<'a> {
+    pub(super) layer: usize,
+    pub(super) next_zone: usize,
+    pub(super) next_next_zone: Option<usize>,
+    pub(super) anchor_slot: Option<usize>,
+    pub(super) anchors: &'a [Option<usize>],
+    pub(super) candidate_limit: usize,
 }
 
 /// Known prefix utility components for a proposed reverse boundary. These are
 /// recomputed from the boundary anchor assignment, never stored as exact
 /// suffix utility: the first home leg and first-choice attractions are exact
 /// components, while durations and unknown inbound legs remain deferred.
-fn reverse_prefix_partial_score(
+pub(super) fn reverse_prefix_partial_score(
     inputs: &SearchInputs<'_>,
     layer: usize,
     destination: usize,
@@ -191,7 +193,7 @@ fn reverse_prefix_partial_score(
 /// Rank a reverse extension by the exact factor already determined on its
 /// right. The score is proposal-only; retained suffix nodes continue to own
 /// and accumulate that exact factor through `LocalScoreCache`.
-fn reverse_factor_map_candidates(
+pub(super) fn reverse_factor_map_candidates(
     inputs: &SearchInputs<'_>,
     request: ReverseFactorMapRequest<'_>,
     maps: &mut FactorMapCache,
@@ -262,7 +264,7 @@ fn reverse_factor_map_candidates(
 /// affected by choosing a forward destination. Missing entries are infeasible;
 /// no sentinel values are introduced. This is an experimental alternative to
 /// the binned surface: it ranks the intersection of the three maps directly.
-fn factor_map_candidates(
+pub(super) fn factor_map_candidates(
     inputs: &SearchInputs<'_>,
     request: FactorMapRequest<'_>,
     suffix_nodes: &[SuffixNode],
@@ -305,7 +307,8 @@ fn factor_map_candidates(
                     let mut map = FactorScoreMap::with_capacity(domain.len());
                     for (position, &destination) in domain.iter().enumerate() {
                         let score = inbound.and_then(|inbound| {
-                            let outbound = inputs.graph.factor_edge_from(request.origin, destination)?;
+                            let outbound =
+                                inputs.graph.factor_edge_from(request.origin, destination)?;
                             let next_departure = if inputs.parameters.update_plan_timings {
                                 Some(
                                     adjusted_times(inputs.context.steps[request.layer], outbound)?
@@ -350,46 +353,47 @@ fn factor_map_candidates(
         }
         let next_zone = suffix.zone;
         let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
-        let current_map =
-            match maps
-                .current
-                .entry((request.layer, request.origin, next_zone))
-            {
-                Entry::Occupied(entry) => {
-                    maps.current_hits += 1;
-                    entry.into_mut()
-                }
-                Entry::Vacant(entry) => {
-                    maps.current_builds += 1;
-                    maps.current_destination_scans += domain.len() as u64;
-                    let map = {
-                        let mut map = FactorScoreMap::with_capacity(domain.len());
-                        for (position, &destination) in domain.iter().enumerate() {
-                            let score = inputs.graph.factor_edge_from(request.origin, destination).and_then(
-                                |inbound| {
-                                    inputs.graph.factor_edge_to(destination, next_zone).and_then(
-                                        |outbound| {
-                                            score_local_weight_edges(
-                                                inputs.scoring(),
-                                                request.layer,
-                                                destination,
-                                                inbound,
-                                                Some(outbound),
-                                            )
-                                        },
-                                    )
-                                },
-                            );
-                            if let Some(score) = score {
-                                map.push(position, score);
-                            }
+        let current_map = match maps
+            .current
+            .entry((request.layer, request.origin, next_zone))
+        {
+            Entry::Occupied(entry) => {
+                maps.current_hits += 1;
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => {
+                maps.current_builds += 1;
+                maps.current_destination_scans += domain.len() as u64;
+                let map = {
+                    let mut map = FactorScoreMap::with_capacity(domain.len());
+                    for (position, &destination) in domain.iter().enumerate() {
+                        let score = inputs
+                            .graph
+                            .factor_edge_from(request.origin, destination)
+                            .and_then(|inbound| {
+                                inputs
+                                    .graph
+                                    .factor_edge_to(destination, next_zone)
+                                    .and_then(|outbound| {
+                                        score_local_weight_edges(
+                                            inputs.scoring(),
+                                            request.layer,
+                                            destination,
+                                            inbound,
+                                            Some(outbound),
+                                        )
+                                    })
+                            });
+                        if let Some(score) = score {
+                            map.push(position, score);
                         }
-                        map
-                    };
-                    maps.current_feasible_entries += map.len() as u64;
-                    entry.insert(map)
-                }
-            };
+                    }
+                    map
+                };
+                maps.current_feasible_entries += map.len() as u64;
+                entry.insert(map)
+            }
+        };
         let next_map = next_factor_map(
             inputs,
             NextFactorMapRequest {

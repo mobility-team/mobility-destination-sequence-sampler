@@ -1,7 +1,9 @@
+use super::*;
+
 /// Add a small set of suffix boundary states proposed from the retained forward
 /// frontier. The original backward frontier remains intact: this is a bounded
 /// F-to-B seam refresh, not a replacement of reverse candidate generation.
-struct RefreshSuffixRequest<'a> {
+pub(super) struct RefreshSuffixRequest<'a> {
     prefix_anchors: &'a [Option<usize>],
     candidate_slot: Option<usize>,
     candidate: usize,
@@ -10,7 +12,7 @@ struct RefreshSuffixRequest<'a> {
     messages: &'a BackwardMessages,
 }
 
-fn best_refresh_suffix(
+pub(super) fn best_refresh_suffix(
     inputs: &SearchInputs<'_>,
     local_scores: &mut LocalScoreCache,
     request: RefreshSuffixRequest<'_>,
@@ -54,7 +56,7 @@ fn best_refresh_suffix(
     best
 }
 
-fn refresh_stitch_frontier(
+pub(super) fn refresh_stitch_frontier(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
     stitch_layer: usize,

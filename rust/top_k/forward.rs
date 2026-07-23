@@ -1,4 +1,6 @@
-fn forward_beam(
+use super::*;
+
+pub(super) fn forward_beam(
     inputs: &SearchInputs<'_>,
     scratch: &mut SearchScratch,
     stitch_layer: usize,
