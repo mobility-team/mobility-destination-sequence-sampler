@@ -218,7 +218,64 @@ it until those contexts and an all-depth oracle audit are examined.
 
 The active default remains symmetric factor-map search with its depth cutoff.
 The dense graph views, compact sparse factor maps, and active coherent tracing
-are retained. The small disagreement-gated heuristic reserve remains disabled:
-it has no measured cohort gain. The next work should use the coherent trace on
-hard/deep cases to distinguish missing candidate support from state pruning,
-then test only a narrowly scoped repair with an agreed oracle/runtime cohort.
+are retained. Its compact partial-message proposal budget is now 20: across
+five deterministic 50-context cohorts it raises mean Mass@10/Recall@10 from
+0.853/0.830 (budget 8) to 0.892/0.884, while the full 81,844-context release
+workload finishes in 22.35 s. Budget 24 reaches only 0.894 Mass@10, so 20 is
+the current knee. The small disagreement-gated heuristic reserve remains
+disabled: it has no stable cohort gain. Exact one-layer seed repair is retained
+only as a diagnostic: it recovers the rank-one 2679 path but costs about ten
+seconds per pass. The next work should use the coherent trace on hard/deep
+cases to distinguish missing candidate support from state pruning.
+
+### Deep oracle coverage diagnostic (2026-07-23)
+
+The former all-depth pilot requested exact top-100 plans even though its
+primary comparison metric was Mass@10. A new stratified diagnostic records the
+pre-search exact shape (independent variables, log10 assignment lattice,
+home returns, and repeated anchors) for both solved and capped cases, plus
+heap/pruning counters for solved cases.
+
+On two deterministic samples per 22 strata at a 500k-state cap, exact top-10
+proof completes 32/44 samples and gives 93.7% population coverage by
+oracle-certifiable stratum (31 bounded completions). The remaining state caps
+have median five independent variables and a `10^15` assignment lattice,
+versus two variables and `10^6` for solved contexts. Repeated anchors do not
+separate the two groups in this pilot. Requesting top 10 is exact for
+Recall@10/Mass@10 and cuts median solved states from 1,110 under top-100 to
+270. Keep top-100 audits for tail/distribution questions; use the new
+`just audit-deep-top-k` gate for deep primary-quality coverage.
+
+The audit then exposed an exact-oracle correctness issue: the home-range split
+could concatenate independently ranked segments into a sequence rejected by
+the full scorer (context 9619). The shortcut is disabled until its crossing
+factor can be allocated exactly at merge. The corrected 5-per-stratum audit
+has no internal oracle errors, proves 78/110 samples, and retains the same
+99.4% stratum-population coverage. It certifies six depth-6 contexts at mean
+Mass@10 0.593; deep fallback remains weak, but its measurement is now sound.
+
+On that corrected cached support, removing the depth cutoff
+(`factor_map_max_depth=99`) is not a deep repair: it completes one additional
+case but lowers the certified depth-6 mean from 0.593 to 0.551 and leaves four
+zero-mass cases. Contexts 944 and 50986 lose decisive first-layer destinations
+under the heuristic fallback; full factor maps do not recover them. The next
+deep experiment must add targeted first-layer/reverse support, not merely
+extend factor-map depth.
+
+### Depth-resolved deep audit (2026-07-23)
+
+The `6+` band is now split into depths 6, 7, 8, 9, and 10+. The cached
+10-per-stratum exact-top-10 audit has 183 oracle-proven cases and 99.7%
+stratum-population coverage. Certified mean Mass@10 falls with depth:
+depth 5/6/7/8 is 0.781/0.681/0.602/0.528 (depths 9 and 10 have only two and
+four proven cases). State-capped contexts have median six independent
+variables and a `10^18` assignment lattice.
+
+Representative zeroes span depths 6--10. Full factor maps through depth 99
+recover none of five such cases. Widening the heuristic pool from 16 to 64
+per source recovers selected depth-7/8 cases (Mass@10 0.616 and 0.273), but
+not the depth-6/7/10 zeroes. In context 944, that wider pool does retain the
+true first-layer choices; the plan is then lost in later continuation/beam
+selection. Pool 64 plus beam 128 recovers only one path (Mass@10 0.095) at
+9.88 ms/context. Reject global deep widening: deep losses mix missing support
+with continuation ranking, so a future repair must be selectively triggered.

@@ -35,6 +35,14 @@ compare-k-sweep-seeds: build-release
 audit-global-quality per_stratum='1' max_states='200000': build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --contexts-per-stratum {{per_stratum}} --top-k 10 --oracle-depth 100 --max-states {{max_states}} --frontier-width 32 --proposal-limit-per-source 16 --continuation-state-limit 1 --continuation-proposal-limit 1; exit $LASTEXITCODE
 
+# Broader exact coverage for the primary Mass@10 metric; top-100 remains the tail audit.
+audit-deep-top-k per_stratum='2' max_states='500000': build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --contexts-per-stratum {{per_stratum}} --top-k 10 --oracle-depth 10 --max-states {{max_states}} --frontier-width 32 --proposal-limit-per-source 16 --continuation-state-limit 1 --continuation-proposal-limit 1; exit $LASTEXITCODE
+
+# Depth-resolved exact top-10 audit. Use a larger cached sample for deep decisions.
+audit-deep-by-depth per_stratum='10' max_states='500000': build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --contexts-per-stratum {{per_stratum}} --top-k 10 --oracle-depth 10 --max-states {{max_states}} --frontier-width 32 --proposal-limit-per-source 16 --continuation-state-limit 1 --continuation-proposal-limit 1; exit $LASTEXITCODE
+
 compare-refresh: build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_seam_refresh --contexts 50 --seam-refresh-per-prefix 0 --seam-refresh-per-prefix 1 --seam-refresh-per-prefix 2 --seam-refresh-per-prefix 4; exit $LASTEXITCODE
 

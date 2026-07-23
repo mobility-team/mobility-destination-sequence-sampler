@@ -11,7 +11,11 @@ fn forward_beam(
     let beam_width = inputs.options.frontier_width;
     let candidate_count = inputs.options.proposal_limit_per_source;
     let anchor_slots = &inputs.anchor_slots;
-    let continuation_state_limit = inputs.options.continuation_state_limit;
+    let continuation_state_limit = if context.steps.len() > inputs.options.factor_map_max_depth {
+        inputs.options.deep_continuation_state_limit
+    } else {
+        inputs.options.continuation_state_limit
+    };
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
     let factor_map_guidance_limit = continuation_state_limit.max(4);
     let heuristic_reserve_limit = inputs.options.heuristic_reserve_limit;

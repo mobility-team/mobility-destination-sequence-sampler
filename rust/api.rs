@@ -41,7 +41,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=8, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=16, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -62,6 +62,8 @@ impl DestinationPlanSearch {
         factor_map_max_depth: usize,
         stitch_bias: i32,
         continuation_state_limit: usize,
+        deep_continuation_state_limit: usize,
+        continuation_log_gap: f64,
         continuation_proposal_limit: usize,
         seam_refresh_per_prefix: usize,
         heuristic_reserve_limit: usize,
@@ -77,10 +79,11 @@ impl DestinationPlanSearch {
         if frontier_width == 0
             || proposal_limit_per_source == 0
             || continuation_state_limit == 0
+            || deep_continuation_state_limit == 0
             || continuation_proposal_limit == 0
         {
             return Err(SamplerError::InvalidInput(
-                "frontier_width, proposal_limit_per_source, continuation_state_limit, and continuation_proposal_limit must be positive".to_string(),
+                "frontier_width, proposal_limit_per_source, continuation state limits, and continuation_proposal_limit must be positive".to_string(),
             )
             .into());
         }
@@ -88,6 +91,12 @@ impl DestinationPlanSearch {
             return Err(
                 SamplerError::InvalidInput("surface_bins must be 2 or 4".to_string()).into(),
             );
+        }
+        if !continuation_log_gap.is_finite() || continuation_log_gap < 0.0 {
+            return Err(SamplerError::InvalidInput(
+                "continuation_log_gap must be finite and non-negative".to_string(),
+            )
+            .into());
         }
         if factor_map_max_depth < 2 {
             return Err(SamplerError::InvalidInput(
@@ -134,6 +143,8 @@ impl DestinationPlanSearch {
                     factor_map_max_depth,
                     stitch_bias,
                     continuation_state_limit,
+                    deep_continuation_state_limit,
+                    continuation_log_gap,
                     continuation_proposal_limit,
                     seam_refresh_per_prefix,
                     heuristic_reserve_limit,
@@ -365,6 +376,7 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
             item.set_item("guidance_retained", &target.guidance_retained)?;
             item.set_item("guidance_proposed", &target.guidance_proposed)?;
             item.set_item("exact_guidance_rank", &target.exact_guidance_rank)?;
+            item.set_item("exact_guidance_log_gap", &target.exact_guidance_log_gap)?;
             item.set_item(
                 "prefix_pruned",
                 target

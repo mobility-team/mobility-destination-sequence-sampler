@@ -5,6 +5,7 @@
 | Question | Command | Primary result |
 |---|---|---|
 | Default bounded quality against proof | `just compare-quality` | Recall@10 and Mass@10 |
+| Deep primary-quality coverage | `just audit-deep-top-k` | all-depth stratified exact top-10 audit and oracle-cap diagnostics |
 | Output-size behavior | `just compare-k-sweep-seeds` | Recall/Mass across K against top-500 support |
 | Whole-workload budget | `just benchmark-throughput` | wall time, complete/infeasible contexts, profile counts |
 | Returned-support concentration | `just diagnose-returned-distribution` | conditional mass@10/20/50 within returned top-100 |
@@ -34,6 +35,10 @@ estimate of the full exp(U) distribution.
 The oracle may reject a context at `max_states`. Coverage and exclusions from
 that outcome must remain visible; do not silently treat an unproven context as
 a bounded miss or hit.
+
+`audit-deep-top-k` deliberately proves only top 10: that is still exact for
+Recall@10 and Mass@10, and materially expands deep-context certification. Use
+`audit-global-quality` when a top-100 tail support is specifically required.
 
 ## Diagnostics that are deliberately not active support analysis
 

@@ -18,6 +18,7 @@
 | Independent map-guidance reservoir | Rejected | Recovered context 26 (0.733→0.904), but the 15-context stratified pilot was quality-identical at 3.1x bounded time (2.84→8.85 ms/context). |
 | Reverse-prefix compilation/query-cache pilot | Rejected | Median 1,000-context release time improved only 1.3% (0.539 to 0.532 s), while the full workload regressed to 31.146 s and 70,798 complete contexts. |
 | Sparse pair-state DP | Rejected | It recovered the rank-one 2679 failure by retaining `(previous, current)` identity, but a 50-context oracle-proven depth-3--5/no-repeated-anchor audit was lower quality than active factor maps (Mass@10 0.695 vs 0.838), slower (6.75 vs 6.67 ms/context), and hit its 100k retained-path cap once. |
+| Exact one-layer seed repair | Diagnostic only | It recovered the rank-one 2679 path by freeing the middle layer of a bounded seed, but 27 exact neighbourhood calls took 10.3 s and returned only 1/10 oracle paths; a second 9.5 s pass reached 2/10. Shared-anchor contexts cannot use private activity domains. |
 
 Archived code and retired benchmark harnesses are in the
 `research-archive-2026-07-21` Git tag; use

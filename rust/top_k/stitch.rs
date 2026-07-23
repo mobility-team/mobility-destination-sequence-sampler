@@ -133,6 +133,39 @@ fn search_context(
     parameters: Parameters,
     options: TopKOptions,
 ) -> Result<(OutputTable, TopKReport), SamplerError> {
+    if options.continuation_log_gap == 0.0 {
+        return search_context_once(graph, destinations, context, parameters, options);
+    }
+    let fallback_options = options.clone();
+    match search_context_once(graph, destinations, context, parameters, options) {
+        Err(SamplerError::NoFeasibleSequence { .. })
+            if fallback_options.continuation_log_gap > 0.0 =>
+        {
+            // Score-band guidance is allowed to be selective, but it must not
+            // turn a feasible bounded context into an infeasible one. Retry
+            // the rare empty stitch with the fixed-width channel.
+            search_context_once(
+                graph,
+                destinations,
+                context,
+                parameters,
+                TopKOptions {
+                    continuation_log_gap: 0.0,
+                    ..fallback_options
+                },
+            )
+        }
+        result => result,
+    }
+}
+
+fn search_context_once(
+    graph: &OdGraph,
+    destinations: &DestinationIndex,
+    context: &Context,
+    parameters: Parameters,
+    options: TopKOptions,
+) -> Result<(OutputTable, TopKReport), SamplerError> {
     let started = options.profile.then(Instant::now);
     if context.steps.len() < 2 {
         return Err(SamplerError::InvalidInput(format!(

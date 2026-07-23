@@ -11,12 +11,14 @@ ACTIVE_TOP_K_DEFAULTS = {
     "proposal_limit_per_source": 16,
     "symmetric_message_limit": 4,
     "symmetric_state_limit": 4,
-    "symmetric_forward_proposal_limit": 8,
+    "symmetric_forward_proposal_limit": 20,
     "candidate_strategy": "symmetric_factor_map",
     "surface_bins": 2,
     "factor_map_max_depth": 5,
     "stitch_bias": 1,
     "continuation_state_limit": 1,
+    "deep_continuation_state_limit": 16,
+    "continuation_log_gap": 0.0,
     "continuation_proposal_limit": 1,
     "seam_refresh_per_prefix": 1,
     "heuristic_reserve_limit": 0,
@@ -68,6 +70,16 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         "--continuation-state-limit",
         type=int,
         default=ACTIVE_TOP_K_DEFAULTS["continuation_state_limit"],
+    )
+    parser.add_argument(
+        "--deep-continuation-state-limit",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["deep_continuation_state_limit"],
+    )
+    parser.add_argument(
+        "--continuation-log-gap",
+        type=float,
+        default=ACTIVE_TOP_K_DEFAULTS["continuation_log_gap"],
     )
     parser.add_argument(
         "--continuation-proposal-limit",

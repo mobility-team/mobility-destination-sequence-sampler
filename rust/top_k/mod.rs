@@ -298,6 +298,10 @@ pub struct ActiveTraceTargetReport {
     /// Best rank of a target zone in the exact reverse-guidance candidate
     /// score at each layer; `None` means it was never proposed there.
     pub exact_guidance_rank: Vec<Option<usize>>,
+    /// Score loss of the best target-zone reverse-guidance child relative to
+    /// the best child at that layer. This exposes whether a missed target was
+    /// narrowly or decisively below the one-state continuation channel.
+    pub exact_guidance_log_gap: Vec<Option<f64>>,
 }
 
 #[derive(Clone)]
@@ -314,6 +318,10 @@ pub struct TopKOptions {
     pub factor_map_max_depth: usize,
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
+    pub deep_continuation_state_limit: usize,
+    /// Retain reverse-guidance alternatives whose score is within this log
+    /// utility band of the best. Zero preserves fixed-width behavior.
+    pub continuation_log_gap: f64,
     pub continuation_proposal_limit: usize,
     pub seam_refresh_per_prefix: usize,
     pub heuristic_reserve_limit: usize,
@@ -362,6 +370,7 @@ impl ActiveTrace {
                     guidance_retained: vec![false; zones.len()],
                     guidance_proposed: vec![false; zones.len()],
                     exact_guidance_rank: vec![None; zones.len()],
+                    exact_guidance_log_gap: vec![None; zones.len()],
                 },
             ));
         }
@@ -451,13 +460,22 @@ impl ActiveTrace {
                 .then_with(|| left_index.cmp(right_index))
         });
         for (target, report) in &mut self.targets {
-            let rank = ranked
+            let target = ranked
                 .iter()
-                .position(|(index, _)| children[*index].1 == target[layer])
-                .map(|index| index + 1);
-            if let Some(rank) = rank {
+                .find(|(index, _)| children[*index].1 == target[layer])
+                .copied();
+            if let Some((target_index, target_score)) = target {
+                let rank = ranked
+                    .iter()
+                    .position(|(index, _)| *index == target_index)
+                    .expect("target score came from ranked children")
+                    + 1;
                 report.exact_guidance_rank[layer] = Some(
                     report.exact_guidance_rank[layer].map_or(rank, |existing| existing.min(rank)),
+                );
+                let gap = ranked[0].1 - target_score;
+                report.exact_guidance_log_gap[layer] = Some(
+                    report.exact_guidance_log_gap[layer].map_or(gap, |existing| existing.min(gap)),
                 );
             }
         }
@@ -613,6 +631,30 @@ fn select_beam_indices(scores: &[f64], beam_width: usize) -> Vec<usize> {
         .into_iter()
         .take(beam_width)
         .map(|(index, _)| index)
+        .collect()
+}
+
+/// Score-ranked states in a bounded near-optimal band. The best state is
+/// always retained; a zero band intentionally keeps the historical fixed
+/// width selection behavior.
+fn select_guidance_indices(scores: &[f64], max_width: usize, log_gap: f64) -> Vec<usize> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+    if log_gap == 0.0 {
+        return select_beam_indices(scores, max_width);
+    }
+    let mut ranked = (0..scores.len()).collect::<Vec<_>>();
+    ranked.sort_unstable_by(|&left, &right| {
+        scores[right]
+            .total_cmp(&scores[left])
+            .then_with(|| left.cmp(&right))
+    });
+    let best = scores[ranked[0]];
+    ranked
+        .into_iter()
+        .take_while(|&index| scores[index] >= best - log_gap)
+        .take(max_width)
         .collect()
 }
 

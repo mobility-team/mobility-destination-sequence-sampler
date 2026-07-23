@@ -9,21 +9,22 @@ Full prepared Grand Geneve workload (81,844 contexts, 328,197 steps, 1,110
 zones), eight threads; `frontier_width=40`, `proposal_limit_per_source=16`,
 `factor_map_max_depth=5`, `stitch_bias=1`, `continuation_state_limit=1`,
 `continuation_proposal_limit=1`, `symmetric_message_limit=4`,
-`symmetric_state_limit=4`, `symmetric_forward_proposal_limit=8`,
+`symmetric_state_limit=4`, `symmetric_forward_proposal_limit=20`,
 `seam_refresh_per_prefix=1`, `top_k=10`.
 
 | Policy | Wall time | Complete | Infeasible |
 |---|---:|---:|---:|
-| Symmetric factor map, depth <=5 (default) | 28.93 s | 70,799 | 11,045 |
+| Symmetric factor map, depth <=5 (default) | 22.35 s | 70,801 | 11,043 |
 | Asymmetric factor map | 16.30 s | 70,335 | 11,509 |
 | Binned surface comparator | 8.785 s | 70,143 | 11,701 |
 | Heuristic comparator | 6.591 s | 70,351 | 11,493 |
 
 The default remains within the 30-second target. Across five deterministic
-50-context exact cohorts, the default scores mean `Mass@10` 0.854 and
-`Recall@10` 0.832 (asymmetric: 0.703/0.684). Known-prefix factor scoring and
-compact repeated-anchor handoff account for the latest gain. Exact-oracle
-results are cached by immutable-input/scorer fingerprint.
+50-context exact cohorts, the default scores mean `Mass@10` 0.892 and
+`Recall@10` 0.884. The previous compact partial-proposal budget of 8 scored
+0.853/0.830; 20 is the measured quality/runtime knee (24 reaches 0.894).
+Known-prefix factor scoring and compact repeated-anchor handoff account for
+the gain. Exact-oracle results are cached by immutable-input/scorer fingerprint.
 Older throughput and
 quality measurements are experiment history, not the active baseline.
 

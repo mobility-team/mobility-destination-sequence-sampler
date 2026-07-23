@@ -80,7 +80,7 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 | `factor_map_max_depth` | 5 | factor-map policies | deeper contexts fall back to heuristic support |
 | `symmetric_message_limit` | 4 | symmetric only | partial reverse messages; zero disables that channel |
 | `symmetric_state_limit` | 4 | symmetric only | retained partial reverse states away from the seam |
-| `symmetric_forward_proposal_limit` | 8 | symmetric only | total compact partial-message proposals handed forward |
+| `symmetric_forward_proposal_limit` | 20 | symmetric only | total compact partial-message proposals handed forward |
 | `surface_bins` | 2 | `surface` only | binned comparator resolution (2 or 4) |
 | `continuation_state_limit` | 1 | all | exact reverse guidance states consulted forward |
 | `continuation_proposal_limit` | 1 | all | reverse-projection proposals per guidance state |

@@ -340,35 +340,14 @@ struct RankedPlan {
 }
 
 fn independent_home_ranges(
-    context: &Context,
-    ranges: &[(usize, usize)],
+    _context: &Context,
+    _ranges: &[(usize, usize)],
 ) -> Option<Vec<(usize, usize)>> {
-    if ranges.len() <= 1 {
-        return None;
-    }
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
-    for &(start, end) in ranges {
-        let only_fixed = context.steps[start..end]
-            .iter()
-            .all(|step| step.fixed_destination.is_some());
-        if only_fixed && !merged.is_empty() {
-            merged.last_mut().unwrap().1 = end;
-        } else {
-            merged.push((start, end));
-        }
-    }
-    if merged.len() <= 1
-        || merged[..merged.len() - 1].iter().any(|&(_, end)| {
-            context.steps[end].fixed_destination.is_none()
-                && context.steps[end]
-                    .arrival_time_rigidity
-                    .is_none_or(|rigidity| rigidity != 0.0)
-        })
-    {
-        None
-    } else {
-        Some(merged)
-    }
+    // A local factor spans a fixed-home boundary: scoring independently then
+    // concatenating segment plans can select a sequence rejected by the full
+    // scorer (for example context 9619).  Do not use this as an exact-oracle
+    // shortcut until the boundary factor is allocated exactly during merge.
+    None
 }
 
 fn cross_home_anchor_ids(context: &Context, ranges: &[(usize, usize)]) -> Vec<u32> {

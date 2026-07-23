@@ -15,6 +15,7 @@ import math
 import os
 import tempfile
 import time
+from statistics import median
 from pathlib import Path
 
 import polars as pl
@@ -90,6 +91,20 @@ def parse_args() -> argparse.Namespace:
         help="inspect candidate-pool coverage for one known context ID",
     )
     parser.add_argument(
+        "--design-manifest",
+        type=Path,
+        help=(
+            "write a reproducible, depth-diverse set of oracle-proven success, "
+            "partial, and zero-mass cases from audit mode"
+        ),
+    )
+    parser.add_argument(
+        "--audit-min-layers",
+        type=int,
+        default=2,
+        help="audit mode: exclude shallow contexts so oracle budget targets deep strata",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="show every returned plan and every missed exact top-K plan",
@@ -106,6 +121,11 @@ def parse_args() -> argparse.Namespace:
         "--no-oracle-cache",
         action="store_true",
         help="recompute exact cases instead of reusing fingerprinted oracle results",
+    )
+    parser.add_argument(
+        "--cached-oracles-only",
+        action="store_true",
+        help="evaluate only already-certified cached exact results; never start an oracle search",
     )
     parser.add_argument(
         "--compact",
@@ -225,6 +245,20 @@ class OracleCache:
         atomic_write(report_path, json.dumps(oracle_report).encode())
         return oracle_table, oracle_report, False
 
+    def load_cached(
+        self, context_id: int
+    ) -> tuple[pl.DataFrame, dict[str, int]] | None:
+        """Return an existing certificate, without creating cache state."""
+        stem = f"context-{context_id}-k{self.oracle_depth}-states-{self.max_states}"
+        table_path = self.path / f"{stem}.parquet"
+        report_path = self.path / f"{stem}.json"
+        error_path = self.path / f"{stem}.error.json"
+        if table_path.exists() and report_path.exists():
+            return pl.read_parquet(table_path), json.loads(report_path.read_text())
+        if error_path.exists():
+            raise ValueError(json.loads(error_path.read_text())["error"])
+        return None
+
 
 def eligible_context_ids(
     profiles: pl.DataFrame, args: argparse.Namespace, exploration_seed: int
@@ -237,6 +271,10 @@ def eligible_context_ids(
         raise ValueError("--contexts and --candidate-contexts must be positive")
     if args.max_layers < 2:
         raise ValueError("--max-layers must be at least two")
+    if args.audit_min_layers < 2:
+        raise ValueError("--audit-min-layers must be at least two")
+    if args.cached_oracles_only and args.no_oracle_cache:
+        raise ValueError("--cached-oracles-only requires the oracle cache")
     if args.context_ids:
         missing = [
             context_id
@@ -250,7 +288,7 @@ def eligible_context_ids(
         if profiles.filter(pl.col("context_id") == args.trace_context).is_empty():
             raise ValueError(f"context {args.trace_context} does not exist")
         return [args.trace_context]
-    minimum_layers = 2 if args.contexts_per_stratum is not None else 3
+    minimum_layers = args.audit_min_layers if args.contexts_per_stratum is not None else 3
     eligible = profiles.filter(pl.col("layers") >= minimum_layers).with_columns(
         sample_order=pl.col("context_id").hash(seed=exploration_seed)
     )
@@ -280,8 +318,14 @@ def context_profiles(steps: pl.DataFrame) -> pl.DataFrame:
     )
     return (
         profiles.with_columns(
-            depth_band=pl.when(pl.col("layers") >= 6)
-            .then(pl.lit("6+"))
+            depth_band=pl.when(pl.col("layers") >= 10)
+            .then(pl.lit("10+"))
+            .when(pl.col("layers") == 9)
+            .then(pl.lit("9"))
+            .when(pl.col("layers") == 8)
+            .then(pl.lit("8"))
+            .when(pl.col("layers") == 7)
+            .then(pl.lit("7"))
             .otherwise(pl.col("layers").cast(pl.String)),
             anchor_count_band=pl.when(pl.col("anchor_count") >= 3)
             .then(pl.lit("3+"))
@@ -412,6 +456,31 @@ def print_global_audit_estimate(
         print(
             f"{top_k} | {weighted('retained_top_k_mass'):.3f} "
             f"| {weighted('retained_oracle_mass'):.3f}"
+        )
+
+
+def print_audit_quality_by_stratum(
+    population_by_stratum: dict[str, int],
+    outcomes: dict[str, dict[str, int]],
+    metrics_by_stratum: dict[str, dict[str, list[float]]],
+) -> None:
+    """Expose every sampled stratum, including bounded failures as zero mass."""
+    print("\nAll-stratum certified Mass@K")
+    print("stratum | population | exact n | bounded n | recall | mass")
+    for stratum in sorted(population_by_stratum):
+        outcome = outcomes[stratum]
+        metrics = metrics_by_stratum.get(stratum)
+        if not metrics:
+            print(
+                f"{stratum} | {population_by_stratum[stratum]} | 0 | 0 | - | -"
+            )
+            continue
+        count = len(metrics["retained_top_k_mass"])
+        print(
+            f"{stratum} | {population_by_stratum[stratum]} | "
+            f"{outcome['oracle_completed']} | {count} | "
+            f"{sum(metrics['recall']) / count:.3f} | "
+            f"{sum(metrics['retained_top_k_mass']) / count:.3f}"
         )
 
 
@@ -585,6 +654,7 @@ def trace_active_stage_coverage(report: dict[str, object]) -> None:
         guidance_retained = trace["guidance_retained"]
         guidance_proposed = trace["guidance_proposed"]
         exact_guidance_rank = trace["exact_guidance_rank"]
+        exact_guidance_log_gap = trace["exact_guidance_log_gap"]
         print(f"  exact rank={rank} zones={tuple(zones)}")
         for layer, (zone, was_proposed, was_retained, was_pruned) in enumerate(
             zip(zones, proposed, retained, pruned, strict=True)
@@ -612,7 +682,8 @@ def trace_active_stage_coverage(report: dict[str, object]) -> None:
                 print(
                     f"      reverse guidance: target proposed={guidance_proposed[layer]}, "
                     f"retained={guidance_retained[layer]}, "
-                    f"exact-rank={exact_guidance_rank[layer]}"
+                    f"exact-rank={exact_guidance_rank[layer]}, "
+                    f"log-gap={exact_guidance_log_gap[layer]}"
                 )
 
 
@@ -818,6 +889,7 @@ def compare_seed(
     initial_locations: pl.DataFrame,
     od_costs: pl.DataFrame,
     destination_inputs: pl.DataFrame,
+    destination_domain_sizes: dict[int, int],
     profiles: pl.DataFrame,
     profile_by_context: dict[int, tuple[int, int, int, str]],
     population_by_stratum: dict[str, int],
@@ -858,6 +930,8 @@ def compare_seed(
     layer_metrics = {top_k: {} for top_k in top_ks}
     archetype_metrics = {top_k: {} for top_k in top_ks}
     audit_metrics = {top_k: {} for top_k in top_ks}
+    oracle_diagnostics: list[dict[str, float | int | str]] = []
+    audit_cases: list[dict[str, float | int | str]] = []
     started = time.perf_counter()
     for context_id in eligible_context_ids(profiles, args, exploration_seed):
         layers, anchor_count, anchor_activity_types, audit_stratum = profile_by_context[context_id]
@@ -865,6 +939,11 @@ def compare_seed(
             audit_outcomes[audit_stratum]["sampled"] += 1
         context_steps = steps.filter(pl.col("context_id") == context_id)
         context_initial = initial_locations.filter(pl.col("context_id") == context_id)
+        oracle_shape = oracle_context_shape(
+            context_steps,
+            destination_domain_sizes,
+            int(context_initial.item(0, "initial_zone")),
+        )
         try:
             oracle_started = time.perf_counter()
             compute_oracle = lambda: search.exact_top_k(
@@ -881,6 +960,15 @@ def compare_seed(
             if context_id in oracle_memory:
                 oracle_table, oracle_report = oracle_memory[context_id]
                 oracle_cache_hits += 1
+            elif args.cached_oracles_only:
+                cached_result = oracle_cache.load_cached(context_id)
+                if cached_result is None:
+                    skipped += 1
+                    if args.verbose:
+                        print(f"context={context_id} oracle not cached")
+                    continue
+                oracle_table, oracle_report = cached_result
+                oracle_cache_hits += 1
             elif oracle_cache is None:
                 oracle_table, oracle_report = compute_oracle()
                 oracle_cache_misses += 1
@@ -896,11 +984,31 @@ def compare_seed(
             oracle_memory[context_id] = (oracle_table, oracle_report)
         except ValueError as error:
             skipped += 1
+            oracle_diagnostics.append(
+                {
+                    **oracle_shape,
+                    "outcome": oracle_failure_kind(error),
+                    "states_pushed": 0,
+                    "maximum_heap_size": 0,
+                    "children_pruned_by_incumbent": 0,
+                }
+            )
             if audit_mode:
                 audit_outcomes[audit_stratum][oracle_failure_kind(error)] += 1
             if args.verbose:
                 print(f"context={context_id} oracle skipped: {error}")
             continue
+        oracle_diagnostics.append(
+            {
+                **oracle_shape,
+                "outcome": "solved",
+                "states_pushed": int(oracle_report["states_pushed"]),
+                "maximum_heap_size": int(oracle_report["maximum_heap_size"]),
+                "children_pruned_by_incumbent": int(
+                    oracle_report["children_pruned_by_incumbent"]
+                ),
+            }
+        )
         oracle = ranked_plans(oracle_table)
         if audit_mode:
             audit_outcomes[audit_stratum]["oracle_completed"] += 1
@@ -993,6 +1101,16 @@ def compare_seed(
                 audit_metrics[top_k].setdefault(audit_stratum, {})
                 for name, value in metrics.items():
                     audit_metrics[top_k][audit_stratum].setdefault(name, []).append(value)
+                if top_k == min(top_ks):
+                    audit_cases.append(
+                        {
+                            "context": context_id,
+                            "layers": layers,
+                            "stratum": audit_stratum,
+                            "recall": metrics["recall"],
+                            "mass": metrics["retained_top_k_mass"],
+                        }
+                    )
             if args.compact and args.context_ids:
                 print(
                     f"case | {context_id} | {configuration_label} | {exploration_seed} | "
@@ -1006,6 +1124,10 @@ def compare_seed(
             break
     if audit_mode:
         print_audit_coverage(population_by_stratum, audit_outcomes)
+        print_oracle_search_diagnostics(oracle_diagnostics)
+        print_lowest_deep_cases(audit_cases)
+        if args.design_manifest:
+            write_design_manifest(args.design_manifest, audit_cases)
     if not proven:
         if audit_mode:
             print("No sampled context completed the exact top-K oracle.")
@@ -1047,6 +1169,7 @@ def compare_seed(
             if exact_search_seconds
             else "cached"
         )
+
         print(
             f"{top_k:3d} | {mean(metrics['recall']):.3f}  | {bounded_ms:.2f}       "
             f"| {speedup:<7} "
@@ -1071,7 +1194,104 @@ def compare_seed(
     print_stratum_table("By layer count", layer_metrics, top_ks, limit=len(layer_metrics[top_ks[0]]))
     print_stratum_table("By plan archetype", archetype_metrics, top_ks, args.archetype_strata_limit)
     if audit_mode:
+        print_audit_quality_by_stratum(
+            population_by_stratum, audit_outcomes, audit_metrics[min(top_ks)]
+        )
         print_global_audit_estimate(population_by_stratum, audit_outcomes, audit_metrics)
+
+
+def oracle_context_shape(
+    context_steps: pl.DataFrame,
+    destination_domain_sizes: dict[int, int],
+    initial_zone: int,
+) -> dict[str, float | int]:
+    """Exact-search shape known before the oracle is allowed to expand states."""
+    variable_activities: dict[tuple[str, int], int] = {}
+    home_returns = 0
+    repeated_anchor_visits = 0
+    seen_anchors: set[int] = set()
+    for step in context_steps.sort("layer").iter_rows(named=True):
+        if step["fixed_destination"] == initial_zone:
+            home_returns += 1
+        if step["fixed_destination"] is not None:
+            continue
+        anchor_id = step["anchor_id"]
+        if anchor_id is None:
+            key = ("layer", int(step["layer"]))
+        else:
+            key = ("anchor", int(anchor_id))
+            if int(anchor_id) in seen_anchors:
+                repeated_anchor_visits += 1
+            seen_anchors.add(int(anchor_id))
+        variable_activities.setdefault(key, int(step["activity_id"]))
+    domain_sizes = [destination_domain_sizes[activity] for activity in variable_activities.values()]
+    lattice_log10 = sum(math.log10(size) for size in domain_sizes) if domain_sizes else 0.0
+    return {
+        "variables": len(domain_sizes),
+        "lattice_log10": lattice_log10,
+        "home_returns": home_returns,
+        "repeated_anchor_visits": repeated_anchor_visits,
+    }
+
+
+def print_oracle_search_diagnostics(records: list[dict[str, float | int | str]]) -> None:
+    """Expose the shape of completed and capped exact searches in audit mode."""
+    if not records:
+        return
+    print("\nExact-oracle coverage diagnostics")
+    print(
+        "outcome | n | variables median | log10 lattice median | home returns median | "
+        "repeated anchors median | states median | heap median | child-prune median"
+    )
+    for outcome in sorted({str(record["outcome"]) for record in records}):
+        rows = [record for record in records if record["outcome"] == outcome]
+        value = lambda name: median(float(record[name]) for record in rows)
+        states = value("states_pushed") if outcome == "solved" else math.nan
+        heap = value("maximum_heap_size") if outcome == "solved" else math.nan
+        pruned = value("children_pruned_by_incumbent") if outcome == "solved" else math.nan
+        print(
+            f"{outcome} | {len(rows)} | {value('variables'):.1f} | "
+            f"{value('lattice_log10'):.2f} | {value('home_returns'):.1f} | "
+            f"{value('repeated_anchor_visits'):.1f} | "
+            f"{states:.0f} | {heap:.0f} | {pruned:.0f}"
+        )
+
+
+def print_lowest_deep_cases(cases: list[dict[str, float | int | str]]) -> None:
+    """Make the worst certified deep cases directly traceable from an audit."""
+    deep = [case for case in cases if int(case["layers"]) >= 6]
+    if not deep:
+        return
+    print("\nLowest certified deep Mass@10 cases")
+    print("context | layers | stratum | recall | mass")
+    for case in sorted(deep, key=lambda case: (float(case["mass"]), int(case["context"])))[:10]:
+        print(
+            f"{case['context']} | {case['layers']} | {case['stratum']} | "
+            f"{case['recall']:.3f} | {case['mass']:.3f}"
+        )
+
+
+def write_design_manifest(path: Path, cases: list[dict[str, float | int | str]]) -> None:
+    """Persist representative certified cases without tuning to one failure."""
+    by_depth_and_outcome: dict[tuple[int, str], list[dict[str, float | int | str]]] = {}
+    for case in cases:
+        mass = float(case["mass"])
+        outcome = "success" if mass >= 0.999 else "zero" if mass <= 0.0 else "partial"
+        by_depth_and_outcome.setdefault((int(case["layers"]), outcome), []).append(case)
+    selected = []
+    for (_, outcome), candidates in sorted(by_depth_and_outcome.items()):
+        # Median avoids selecting only the easiest success or the single most
+        # pathological miss; the case ID makes this set reproducible.
+        candidates.sort(key=lambda case: (float(case["mass"]), int(case["context"])))
+        selected.append(candidates[len(candidates) // 2] | {"outcome": outcome})
+    payload = {
+        "description": "Certified exact-oracle cases selected by depth and bounded top-10 outcome.",
+        "selection": "one median case for each observed depth x {success, partial, zero} bucket",
+        "cases": selected,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"wrote depth-diverse design manifest | {path} | cases={len(selected)}")
 
 
 def main() -> None:
@@ -1083,12 +1303,20 @@ def main() -> None:
         raise ValueError("--frontier-width must cover every requested K")
     if args.archetype_strata_limit <= 0:
         raise ValueError("--archetype-strata-limit must be positive")
+    if args.design_manifest and args.contexts_per_stratum is None:
+        raise ValueError("--design-manifest requires --contexts-per-stratum audit mode")
     files = resolve_snapshot_files(args.group_day_trips_folder)
     print("Preparing cached Grand Geneve inputs (read-only)...")
     od_costs = prepare_od_costs(files["transport_costs"], files["demand_groups"])
     destination_inputs = prepare_destination_inputs(
         files["destination_saturation"], files["demand_groups"]
     )
+    destination_domain_sizes = {
+        int(activity_id): int(domain_size)
+        for activity_id, domain_size in destination_inputs.group_by("activity_id")
+        .len()
+        .iter_rows()
+    }
     steps, initial_locations, _ = prepare_complete_contexts(
         activity_sequences_path=files["activity_sequences"],
         survey_plan_steps_path=files["survey_plan_steps"],
@@ -1108,6 +1336,7 @@ def main() -> None:
         print(f"Oracle cache: {oracle_cache.path}")
     profiles = context_profiles(steps)
     supported = profiles.filter(pl.col("layers") >= 2)
+    audit_supported = supported.filter(pl.col("layers") >= args.audit_min_layers)
     short = supported.filter(pl.col("layers") <= args.max_layers)
     print("Coverage (Grand Geneve terminal home is an input invariant)")
     print("stage | contexts")
@@ -1116,7 +1345,7 @@ def main() -> None:
     if args.contexts_per_stratum is None:
         print(f"comparison depth=3..{args.max_layers} | {short.height}")
     else:
-        print(f"audit strata | {supported['audit_stratum'].n_unique()}")
+        print(f"audit strata | {audit_supported['audit_stratum'].n_unique()}")
     profile_by_context = {
         int(context_id): (
             int(layers),
@@ -1130,7 +1359,7 @@ def main() -> None:
     }
     population_by_stratum = {
         stratum: int(population)
-        for stratum, population in supported.group_by("audit_stratum").len().iter_rows()
+        for stratum, population in audit_supported.group_by("audit_stratum").len().iter_rows()
     }
     configurations = symmetric_configurations(args)
     oracle_memory: dict[int, tuple[pl.DataFrame, dict]] = {}
@@ -1163,6 +1392,7 @@ def main() -> None:
                 initial_locations,
                 od_costs,
                 destination_inputs,
+                destination_domain_sizes,
                 profiles,
                 profile_by_context,
                 population_by_stratum,
