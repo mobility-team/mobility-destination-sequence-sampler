@@ -41,7 +41,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=99, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=16, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,

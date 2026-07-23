@@ -7,6 +7,7 @@
 //! stitching.
 
 use std::collections::{hash_map::Entry, BTreeSet, HashMap};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -103,6 +104,51 @@ struct BackwardMessages {
     partial_anchor_candidates: Vec<Vec<usize>>,
 }
 
+/// Fast deterministic hashing for per-context caches whose keys contain only
+/// trusted compact integer indexes. These keys cannot be attacker-controlled,
+/// so the collision hardening of the standard `RandomState` is unnecessary in
+/// the hottest exact-score lookup path.
+#[derive(Default)]
+struct TrustedIndexHasher(u64);
+
+impl TrustedIndexHasher {
+    #[inline]
+    fn add(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for TrustedIndexHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.add(u64::from(byte));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, value: u8) {
+        self.add(u64::from(value));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.add(value);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, value: usize) {
+        self.add(value as u64);
+    }
+}
+
+type TrustedIndexMap<K, V> = HashMap<K, V, BuildHasherDefault<TrustedIndexHasher>>;
+type LocalScoreMap = TrustedIndexMap<(usize, usize, usize, Option<usize>), Option<f64>>;
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BackwardGuidanceMode {
     Exact,
@@ -111,7 +157,7 @@ enum BackwardGuidanceMode {
 
 #[derive(Default)]
 struct LocalScoreCache {
-    values: HashMap<(usize, usize, usize, Option<usize>), Option<f64>>,
+    values: LocalScoreMap,
     profile: bool,
     hits: u64,
     builds: u64,

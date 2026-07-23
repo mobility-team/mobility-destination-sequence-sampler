@@ -1,7 +1,30 @@
 # Current benchmarks
 
-Release build, Windows, Grand Geneve iteration-5 cache, 2026-07-22. These are
+Release build, Windows, Grand Geneve iteration-5 cache, 2026-07-23. These are
 kernel measurements, not end-to-end Mobility timings.
+
+## Active bounded top-K
+
+Full prepared workload (81,844 contexts, 328,197 steps, 1,110 zones), eight
+threads; active defaults with `factor_map_max_depth=5` and
+`deep_continuation_state_limit=2`:
+
+| Policy | Wall time | Aggregate Rust | Factor-map CPU |
+|---|---:|---:|---:|
+| Active depth-5 / deep-width-2 | 34.642 s | 201.006 s | 169.204 s |
+| Superseded depth-99 / width-1 | 38.303 s | 216.235 s | 186.209 s |
+
+The interleaved full-workload comparison improves wall time by 9.6% and
+aggregate Rust time by 7.0%. On the matched 41-stratum exact-top-10 audit, the
+active policy raises the post-stratified certified `Mass@10` estimate from
+0.832 to 0.839. The exact oracle solved 183 of 396 sampled contexts, covering
+99.7% of the population by oracle-certifiable stratum.
+
+The local-score cache uses a deterministic hasher for its trusted integer
+tuple keys. Across five 20,000-context release runs this improved median wall
+time from 9.246 to 8.898 seconds (-3.8%) and aggregate Rust search time from
+54.240 to 51.594 seconds (-4.9%). Packing the key regressed runtime and is not
+active.
 
 ## Prior depth-5 bounded top-K baseline
 
@@ -25,12 +48,12 @@ This was the 2026-07-22 default and remains a useful comparison point. Across fi
 0.853/0.830; 20 is the measured quality/runtime knee (24 reaches 0.894).
 Known-prefix factor scoring and compact repeated-anchor handoff account for
 the gain. Exact-oracle results are cached by immutable-input/scorer fingerprint.
-The current default uses `factor_map_max_depth=99` and factor-map support on
-the primary reverse path. In the full 81,844-context interleaved comparison,
-it ran in 39.644 s wall / 233.138 s aggregate Rust; the matched depth-5
-setting took 47.978 s / 292.763 s (+21.0% / +25.6%). Outputs and counters
-differ, so this is a policy comparison rather than a pure performance gate;
-the depth setting also controls deep-continuation width. See
+The later depth-99 setting used factor-map support on the primary reverse path.
+In a full 81,844-context interleaved comparison, it ran in 39.644 s wall /
+233.138 s aggregate Rust; the then-matched depth-5 setting took 47.978 s /
+292.763 s. That result was confounded because the depth setting also activated
+the 16-state deep continuation channel. The active policy above separates
+those knobs. See
 [`experiments/active-bidirectional-top-k.md`](experiments/active-bidirectional-top-k.md)
 for the current decision record. Older throughput and quality measurements are
 experiment history, not the active baseline.

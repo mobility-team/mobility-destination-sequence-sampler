@@ -19,6 +19,14 @@
 | Reverse-prefix compilation/query-cache pilot | Rejected | Median 1,000-context release time improved only 1.3% (0.539 to 0.532 s), while the full workload regressed to 31.146 s and 70,798 complete contexts. |
 | Sparse pair-state DP | Rejected | It recovered the rank-one 2679 failure by retaining `(previous, current)` identity, but a 50-context oracle-proven depth-3--5/no-repeated-anchor audit was lower quality than active factor maps (Mass@10 0.695 vs 0.838), slower (6.75 vs 6.67 ms/context), and hit its 100k retained-path cap once. |
 | Exact one-layer seed repair | Diagnostic only | It recovered the rank-one 2679 path by freeing the middle layer of a bounded seed, but 27 exact neighbourhood calls took 10.3 s and returned only 1/10 oracle paths; a second 9.5 s pass reached 2/10. Shared-anchor contexts cannot use private activity domains. |
+| Four-state ordinary continuation | Rejected | Raising `continuation_state_limit` from 1 to 4 cut the eight-canary mean Mass@10 from 0.313 to 0.189 and doubled zero cases from two to four. |
+| Reverse heuristic reserve | Rejected | Eight extra exact-guidance candidates raised five-cohort mean Mass@10 from 0.886 to 0.895 and the global audit from 0.832 to 0.845, but cost roughly 15--18% runtime. Agreement thresholds retained the cost; four candidates lost the repair. |
+| Trusted factor-map cache hasher | Rejected | Hashing was not the bottleneck in factor-map lookup; a 20,000-context release comparison changed aggregate Rust time by less than 1%. |
+| Packed local-score key | Rejected | Packing the tuple/optional key regressed median aggregate Rust time by 4.1% on 20,000 contexts; keep the tuple with the cheaper trusted hasher. |
+| Exact-guidance score band 0.25 | Rejected | The adaptive band did not repair a hard case and lowered context 57725 Mass@10 from 0.217 to 0.204. |
+| Exact width-zero decomposition | Rejected | Collapsing anchors, exactly scanning independent unary variables, and lazily combining their top-K choices preserved exact quality, but a full release A/B regressed wall 28.749→30.703 s and aggregate measured phase time about 193.4→201.2 s. The 5,296 routed successful contexts added 5.3M domain evaluations. |
+| Width-routed exact best-first search | Rejected | Recomputing 324 cached width-one contexts cost 9.71 ms/context and 147.5M child evaluations; 157 width-two contexts cost 229.74 ms/context and 1.15B children. Raw-zone domain size defeats the favorable treewidth. |
+| Returned/internal candidate-lattice closure | Rejected | Exact recombination over returned per-variable zones could raise cached mean Mass@10 only 0.776→0.782. Internal proposed/retained support bounds were 0.800/0.787 overall and only 0.079/0.002 in zero-mass cases. |
 
 Archived code and retired benchmark harnesses are in the
 `research-archive-2026-07-21` Git tag; use

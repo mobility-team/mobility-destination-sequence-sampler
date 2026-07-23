@@ -213,6 +213,7 @@ def main() -> None:
         f"surface-bins={args.surface_bins} "
         f"factor-map-max-depth={args.factor_map_max_depth} "
         f"continuation={args.continuation_state_limit}x{args.continuation_proposal_limit} "
+        f"deep-continuation={args.deep_continuation_state_limit} "
         f"seam-refresh={args.seam_refresh_per_prefix} "
         f"threads={args.threads}"
     )
@@ -222,6 +223,8 @@ def main() -> None:
         f"complete-plan-candidates={bidirectional_report['complete_plan_candidates']} "
         f"forward-proposals={bidirectional_report['forward_proposals_evaluated']} "
         f"backward-proposals={bidirectional_report['backward_proposals_evaluated']} "
+        f"heuristic-reserve={bidirectional_report['heuristic_reserve_triggers']}/"
+        f"{bidirectional_report['heuristic_reserve_proposals']} triggers/proposals "
         f"refresh-proposals={bidirectional_report['seam_refresh_proposals']} "
         f"refresh-states={bidirectional_report['seam_refresh_states']} "
         f"stitch-pairs={bidirectional_report['stitch_pairs']} "

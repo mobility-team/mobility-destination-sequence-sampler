@@ -14,7 +14,7 @@ oracle. Mobility prepares inputs; this package owns destination choice.
 | `exact_distribution()` | Guarded full exp(U) enumeration for a single small diagnostic context. |
 
 `top_k()` uses unbinned exact factor-map proposals when each home-bounded tour
-is at most depth 99, and bounded attractive, OD-near, and deterministic
+is at most depth 5, and bounded attractive, OD-near, and deterministic
 exploration proposals for longer uninterrupted tours; it carries repeated
 anchors and ranks stitched complete plans by
 the full rigidity-aware utility. See [`DESIGN.md`](DESIGN.md) for schemas and

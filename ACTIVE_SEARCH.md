@@ -14,10 +14,10 @@ fallback.
 
 The default policy is `symmetric_factor_map`. It uses exact, unbinned local
 factor maps when every home-bounded tour is at most
-`factor_map_max_depth=99`; a longer uninterrupted tour uses the bounded
-heuristic proposal pool. Fixed home returns remain part of the full scorer and
-do not make tours independently solvable. A two-step context is a direct exact
-scan.
+`factor_map_max_depth=5`; a longer uninterrupted tour uses the bounded
+heuristic proposal pool with two exact continuation states. Fixed home returns
+remain part of the full scorer and do not make tours independently solvable. A
+two-step context is a direct exact scan.
 
 ## One-context flow
 
@@ -90,13 +90,13 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 | `frontier_width` | 40 | all | retained states on the main beams |
 | `proposal_limit_per_source` | 16 | all | proposal support per retained source |
 | `candidate_strategy` | `symmetric_factor_map` | all | `heuristic`, `surface`, `factor_map`, or active symmetric policy |
-| `factor_map_max_depth` | 99 | factor-map policies | longest home-bounded tour allowed before falling back to heuristic support |
+| `factor_map_max_depth` | 5 | factor-map policies | longest home-bounded tour allowed before falling back to heuristic support |
 | `symmetric_message_limit` | 4 | symmetric only | partial reverse messages; zero disables that channel |
 | `symmetric_state_limit` | 4 | symmetric only | retained partial reverse states away from the seam |
 | `symmetric_forward_proposal_limit` | 20 | symmetric only | total compact partial-message proposals handed forward |
 | `surface_bins` | 2 | `surface` only | binned comparator resolution (2 or 4) |
 | `continuation_state_limit` | 1 | all | exact reverse guidance states consulted forward |
-| `deep_continuation_state_limit` | 16 | contexts deeper than `factor_map_max_depth` | wider exact reverse guidance for heuristic-support depths |
+| `deep_continuation_state_limit` | 2 | contexts deeper than `factor_map_max_depth` | wider exact reverse guidance for heuristic-support depths |
 | `continuation_log_gap` | 0.0 | all | additionally retain exact guidance states within this log-utility band; zero preserves fixed-width behavior |
 | `continuation_proposal_limit` | 1 | all | reverse-projection proposals per guidance state |
 | `seam_refresh_per_prefix` | 1 | all | extra suffix states from retained prefixes; never replaces reverse states |
