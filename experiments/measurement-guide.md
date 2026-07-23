@@ -56,6 +56,7 @@ configuration. `just` recipes may intentionally override a value for a
 historical comparison (for example, width 32 in the K sweep). Treat the
 recipe, its arguments, and the benchmark heading as one named preset; record a
 new preset in `BENCHMARKS.md` before calling it a new baseline.
+
 ## Performance experiment gate
 
 Use `just compare-throughput` for a pure bounded-search performance hypothesis.
