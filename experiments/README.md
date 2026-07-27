@@ -6,8 +6,12 @@ Only bounded bidirectional top-K and the exact oracle are maintained.
 |---|---|
 | Current hypothesis/decision | `active-bidirectional-top-k.md` |
 | Current measurements | `../BENCHMARKS.md`, `benchmarks/bidirectional-top-k.md` |
+| Immutable experiment definitions | `manifests/` |
+| Generated run artifacts | `runs/` |
+| Manifest tooling | `experiment.py`, `harness.py` |
 | Quality harness | `analysis/compare_bidirectional_top_k_grand_geneve.py` |
 | Runtime harness | `benchmarks/perf_bidirectional_grand_geneve.py` |
+| Pricing router diagnostic | `analysis/evaluate_pricing_router.py` |
 | Compact agent diagnostic | `analysis/code_mode_probe.py` |
 | Exact oracle | `../rust/oracle.rs` |
 | Archived directions | `historical.md`, `retired-experiment-notes.md`, `lessons-learned.md` |

@@ -11,26 +11,16 @@ without a new, testable hypothesis.
 ## Commands
 
 - `just install` — editable Python package.
-- `just build-release` — release PyO3 extension.
-- `just build-fast` — optimized non-LTO extension for quality iteration; do not benchmark it.
+- `just build-release` — benchmarkable PyO3 extension.
+- `just build-fast` — quality-iteration build; never benchmark it.
 - `just test` — Python tests (after a build).
-- `just check` — format, Clippy, then tests.
-- `just compare-quality` — 50-context bounded-versus-exact default comparison.
-- `just compare-k-sweep [seed]` — K=10/20/50/100 against a fixed top-500 oracle support.
-- `just compare-k-sweep-seeds` — repeat that sweep for validation seeds 42–46.
-- `just audit-global-quality [per_stratum] [max_states]` — all-depth weighted oracle-audit pilot; failures remain visible.
-- `just compare-refresh` — 0/1/2/4 refresh quality trade-off.
-- `just benchmark-throughput` — 1,000-context eight-thread runtime profile.
-- `just compare-throughput` — interleaved A/B/A throughput check with output
-  fingerprints; use before promoting a hot-loop change.
-- `just canary-quality` — fixed hard/regression cases in one prepared process.
-- `just sweep-symmetric` — compact in-process symmetric parameter sweep.
+- `just check` — format, Clippy, release build, then tests.
+- Fast screens: `just explore-quality NAME=VALUE`, then
+  `just explore-throughput NAME=VALUE`.
+- Decision workflow and metrics: `experiments/measurement-guide.md`.
 
-Run `just --list` for the complete, current command catalog; the list above
-is the maintained core workflow.
-
-Use `rg` for files/text; use `ast-grep` for syntax-aware Rust/Python search or
-mechanical refactors.
+Run `just --list` for the current command catalog. Use `rg` for files/text and
+`ast-grep` for syntax-aware Rust/Python search or mechanical refactors.
 
 ## Ownership and routing
 

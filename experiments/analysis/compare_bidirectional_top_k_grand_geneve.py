@@ -8,10 +8,12 @@ depths and retains oracle failures as coverage data.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import time
 from statistics import median
 from pathlib import Path
+from typing import Any, Callable
 
 import polars as pl
 
@@ -25,8 +27,22 @@ from experiments.benchmarks.perf_grand_geneve_cache import (
     prepare_od_costs,
     resolve_snapshot_files,
 )
-from experiments.oracle_cache import OracleCache, oracle_input_fingerprint
-from experiments.top_k_config import add_top_k_tuning_arguments, top_k_tuning_options
+from experiments.harness import (
+    ExperimentKind,
+    ExperimentManifest,
+    RunRecorder,
+    quality_verdict,
+)
+from experiments.oracle_cache import (
+    OracleCache,
+    oracle_attempt_fingerprint,
+    oracle_input_fingerprint,
+)
+from experiments.top_k_config import (
+    add_top_k_tuning_arguments,
+    apply_top_k_overrides,
+    top_k_tuning_options,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +88,13 @@ def parse_args() -> argparse.Namespace:
         action="append",
         metavar="LABEL:MESSAGES:STATES:PROPOSALS",
         help="repeat to compare symmetric configurations in one prepared process",
+    )
+    parser.add_argument(
+        "--candidate-option",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="fast exploratory A/B override; repeat as needed",
     )
     parser.add_argument("--archetype-strata-limit", type=int, default=12)
     parser.add_argument(
@@ -119,6 +142,11 @@ def parse_args() -> argparse.Namespace:
         help="recompute exact cases instead of reusing fingerprinted oracle results",
     )
     parser.add_argument(
+        "--no-bounded-incumbent",
+        action="store_true",
+        help="disable active bounded plans as exact-oracle lower bounds",
+    )
+    parser.add_argument(
         "--cached-oracles-only",
         action="store_true",
         help="evaluate only already-certified cached exact results; never start an oracle search",
@@ -127,6 +155,22 @@ def parse_args() -> argparse.Namespace:
         "--compact",
         action="store_true",
         help="print one summary row per seed/configuration instead of distributions",
+    )
+    parser.add_argument(
+        "--experiment-manifest",
+        type=Path,
+        help="immutable quality-only A/B config, cohort lock, and gates",
+    )
+    parser.add_argument(
+        "--run-root",
+        type=Path,
+        default=Path("experiments/runs"),
+        help="generated artifact root for manifest-driven runs",
+    )
+    parser.add_argument(
+        "--json-output",
+        type=Path,
+        help="write machine-readable per-configuration quality summaries",
     )
     return parser.parse_args()
 
@@ -332,17 +376,15 @@ def print_global_audit_estimate(
     outcomes: dict[str, dict[str, int]],
     metrics_by_top_k: dict[int, dict[str, list[float]]],
 ) -> None:
-    """Post-stratify oracle-certifiable strata; bounded failures carry zero mass."""
-    covered = [
-        stratum for stratum, outcome in outcomes.items() if outcome["oracle_completed"]
-    ]
+    """Report model-based estimates and bounds for missing exact certificates."""
+    covered = [stratum for stratum in outcomes if stratum in metrics_by_top_k]
     covered_population = sum(population_by_stratum[stratum] for stratum in covered)
     population = sum(population_by_stratum.values())
     if not covered_population:
         return
     print(
-        "\nPilot quality estimate (post-stratified over oracle-certifiable strata; "
-        f"population coverage={covered_population / population:.1%})"
+        "\nPilot quality estimate (solved-context mean imputed within each stratum; "
+        f"strata with evidence={covered_population / population:.1%} of population)"
     )
     print("K | Mass@K | Mass@oracle-support")
     for top_k, metrics_by_stratum in metrics_by_top_k.items():
@@ -355,6 +397,107 @@ def print_global_audit_estimate(
             f"{top_k} | {weighted('retained_top_k_mass'):.3f} "
             f"| {weighted('retained_oracle_mass'):.3f}"
         )
+    print(
+        "\nOracle-missingness bounds "
+        "(sampled contexts without certificates may have mass anywhere in [0, 1])"
+    )
+    print("K | metric | lower | imputed | upper | observed/sampled")
+    for top_k, metrics_by_stratum in metrics_by_top_k.items():
+        for metric, label in (
+            ("retained_top_k_mass", "Mass@K"),
+            ("retained_oracle_mass", "Mass@oracle"),
+        ):
+            summary = stratified_missingness_summary(
+                population_by_stratum,
+                outcomes,
+                metrics_by_stratum,
+                metric,
+            )
+            print(
+                f"{top_k} | {label} | {summary['lower']:.3f} | "
+                f"{summary['imputed']:.3f} | {summary['upper']:.3f} | "
+                f"{summary['observed']}/{summary['sampled']}"
+            )
+    first_top_k = min(metrics_by_top_k)
+    unknowns = stratified_missingness_summary(
+        population_by_stratum,
+        outcomes,
+        metrics_by_top_k[first_top_k],
+        "retained_top_k_mass",
+    )["unknown_impacts"]
+    if unknowns:
+        print("\nHighest-impact oracle unknowns")
+        print("stratum | unresolved/sampled | maximum global interval reduction")
+        for row in unknowns[:10]:
+            print(
+                f"{row['stratum']} | {row['unresolved']}/{row['sampled']} | "
+                f"{row['impact']:.3f}"
+            )
+
+
+def stratified_missingness_summary(
+    population_by_stratum: dict[str, int],
+    outcomes: dict[str, dict[str, int]],
+    metrics_by_stratum: dict[str, dict[str, list[float]]],
+    metric: str,
+) -> dict[str, Any]:
+    """Bound a stratified estimate without treating oracle failures as random hits."""
+    population = sum(population_by_stratum.values())
+    if population <= 0:
+        raise ValueError("audit population must be positive")
+    lower = 0.0
+    upper = 0.0
+    imputed = 0.0
+    sampled_total = 0
+    observed_total = 0
+    unknown_impacts = []
+    for stratum, stratum_population in population_by_stratum.items():
+        sampled = int(outcomes[stratum]["sampled"])
+        values = metrics_by_stratum.get(stratum, {}).get(metric, [])
+        observed = len(values)
+        if observed > sampled:
+            raise ValueError(
+                f"stratum {stratum} has {observed} metrics for {sampled} samples"
+            )
+        population_weight = stratum_population / population
+        sampled_total += sampled
+        observed_total += observed
+        if sampled == 0:
+            upper += population_weight
+            unknown_impacts.append(
+                {
+                    "stratum": stratum,
+                    "sampled": 0,
+                    "unresolved": stratum_population,
+                    "impact": population_weight,
+                }
+            )
+            continue
+        observed_sum = sum(values)
+        unresolved = sampled - observed
+        lower += population_weight * observed_sum / sampled
+        upper += population_weight * (observed_sum + unresolved) / sampled
+        imputed += population_weight * (
+            observed_sum / observed if observed else 0.0
+        )
+        if unresolved:
+            unknown_impacts.append(
+                {
+                    "stratum": stratum,
+                    "sampled": sampled,
+                    "unresolved": unresolved,
+                    "impact": population_weight * unresolved / sampled,
+                }
+            )
+    unknown_impacts.sort(key=lambda row: (-float(row["impact"]), str(row["stratum"])))
+    return {
+        "lower": lower,
+        "imputed": imputed,
+        "upper": upper,
+        "sampled": sampled_total,
+        "observed": observed_total,
+        "unknown_impacts": unknown_impacts,
+    }
 
 
 def print_audit_quality_by_stratum(
@@ -793,7 +936,8 @@ def compare_seed(
     population_by_stratum: dict[str, int],
     oracle_cache: OracleCache | None,
     oracle_memory: dict[int, tuple[pl.DataFrame, dict]],
-) -> None:
+    progress_callback: Callable[..., None] | None = None,
+) -> dict[str, Any]:
     proven = 0
     skipped = 0
     audit_mode = args.contexts_per_stratum is not None
@@ -831,7 +975,8 @@ def compare_seed(
     oracle_diagnostics: list[dict[str, float | int | str]] = []
     audit_cases: list[dict[str, float | int | str]] = []
     started = time.perf_counter()
-    for context_id in eligible_context_ids(profiles, args, exploration_seed):
+    selected_context_ids = eligible_context_ids(profiles, args, exploration_seed)
+    for position, context_id in enumerate(selected_context_ids, start=1):
         layers, anchor_count, anchor_activity_types, audit_stratum = profile_by_context[context_id]
         if audit_mode:
             audit_outcomes[audit_stratum]["sampled"] += 1
@@ -854,6 +999,7 @@ def compare_seed(
                 max_states=args.max_states,
                 n_threads=1,
                 skip_infeasible=False,
+                use_bounded_incumbent=not args.no_bounded_incumbent,
             )
             if context_id in oracle_memory:
                 oracle_table, oracle_report = oracle_memory[context_id]
@@ -864,6 +1010,14 @@ def compare_seed(
                     skipped += 1
                     if args.verbose:
                         print(f"context={context_id} oracle not cached")
+                    if progress_callback:
+                        progress_callback(
+                            "context_complete",
+                            position=position,
+                            total=len(selected_context_ids),
+                            context_id=context_id,
+                            outcome="not_cached",
+                        )
                     continue
                 oracle_table, oracle_report = cached_result
                 oracle_cache_hits += 1
@@ -895,6 +1049,14 @@ def compare_seed(
                 audit_outcomes[audit_stratum][oracle_failure_kind(error)] += 1
             if args.verbose:
                 print(f"context={context_id} oracle skipped: {error}")
+            if progress_callback:
+                progress_callback(
+                    "context_complete",
+                    position=position,
+                    total=len(selected_context_ids),
+                    context_id=context_id,
+                    outcome=oracle_failure_kind(error),
+                )
             continue
         oracle_diagnostics.append(
             {
@@ -984,6 +1146,14 @@ def compare_seed(
                 args.verbose or args.trace_context is not None,
             )
         if len(context_metrics) != len(top_ks):
+            if progress_callback:
+                progress_callback(
+                    "context_complete",
+                    position=position,
+                    total=len(selected_context_ids),
+                    context_id=context_id,
+                    outcome="bounded_failed",
+                )
             continue
         for top_k, metrics in context_metrics.items():
             for name, values in metrics_by_top_k[top_k].items():
@@ -1018,6 +1188,21 @@ def compare_seed(
         proven += 1
         if audit_mode:
             audit_outcomes[audit_stratum]["proven"] += 1
+        if progress_callback:
+            progress_callback(
+                "context_complete",
+                position=position,
+                total=len(selected_context_ids),
+                context_id=context_id,
+                outcome="compared",
+            )
+        if not args.compact and position % 10 == 0:
+            print(
+                f"progress | config={configuration_label} seed={exploration_seed} "
+                f"contexts={position}/{len(selected_context_ids)} proven={proven} "
+                f"skipped={skipped}",
+                flush=True,
+            )
         if not audit_mode and proven == args.contexts:
             break
     if audit_mode:
@@ -1029,9 +1214,83 @@ def compare_seed(
     if not proven:
         if audit_mode:
             print("No sampled context completed the exact top-K oracle.")
-            return
+            return {
+                "configuration": configuration_label,
+                "seed": exploration_seed,
+                "status": "no_proven_contexts",
+                "proven": 0,
+            }
         raise RuntimeError("no context completed the exact top-K oracle")
     wall_seconds = time.perf_counter() - started
+    result: dict[str, Any] = {
+        "configuration": configuration_label,
+        "seed": exploration_seed,
+        "status": "completed",
+        "proven": proven,
+        "skipped": skipped,
+        "wall_seconds": wall_seconds,
+        "oracle_cache": {
+            "hits": oracle_cache_hits,
+            "misses": oracle_cache_misses,
+        },
+        "metrics": {
+            str(top_k): {
+                "recall": sum(metrics_by_top_k[top_k]["recall"]) / proven,
+                "mass": sum(metrics_by_top_k[top_k]["retained_top_k_mass"])
+                / proven,
+                "minimum_mass": min(
+                    metrics_by_top_k[top_k]["retained_top_k_mass"]
+                ),
+                "zero_mass": sum(
+                    mass <= 0.0
+                    for mass in metrics_by_top_k[top_k][
+                        "retained_top_k_mass"
+                    ]
+                ),
+                "bounded_ms_per_context": bounded_search_seconds[top_k]
+                / proven
+                * 1e3,
+            }
+            for top_k in top_ks
+        },
+    }
+    if audit_mode:
+        result["audit"] = {
+            "outcomes": audit_outcomes,
+            "cases": audit_cases,
+            "missingness": {
+                str(top_k): {
+                    metric: stratified_missingness_summary(
+                        population_by_stratum,
+                        audit_outcomes,
+                        audit_metrics[top_k],
+                        metric,
+                    )
+                    for metric in (
+                        "recall",
+                        "retained_top_k_mass",
+                        "retained_oracle_mass",
+                    )
+                }
+                for top_k in top_ks
+            },
+        }
+        primary = result["audit"]["missingness"][str(min(top_ks))]
+        mass_summary = primary["retained_top_k_mass"]
+        recall_summary = primary["recall"]
+        result["quality_summary"] = {
+            "stratified_mass": mass_summary["imputed"],
+            "stratified_recall": recall_summary["imputed"],
+            "zero_mass": sum(
+                value <= 0.0
+                for metrics in audit_metrics[min(top_ks)].values()
+                for value in metrics.get("retained_top_k_mass", [])
+            ),
+            "oracle_interval_width": mass_summary["upper"]
+            - mass_summary["lower"],
+            "oracle_observed": mass_summary["observed"],
+            "oracle_sampled": mass_summary["sampled"],
+        }
     if args.compact:
         if args.context_ids:
             print(
@@ -1049,7 +1308,7 @@ def compare_seed(
                 f"{bounded_search_seconds[top_k] / proven * 1e3:.2f} | "
                 f"{wall_seconds:.2f} | {oracle_cache_hits}/{oracle_cache_misses}"
             )
-        return
+        return result
     print(
         f"\nseed={exploration_seed} proven-contexts={proven} skipped={skipped} "
         f"wall={wall_seconds:.3f}s "
@@ -1096,6 +1355,7 @@ def compare_seed(
             population_by_stratum, audit_outcomes, audit_metrics[min(top_ks)]
         )
         print_global_audit_estimate(population_by_stratum, audit_outcomes, audit_metrics)
+    return result
 
 
 def oracle_context_shape(
@@ -1194,6 +1454,33 @@ def write_design_manifest(path: Path, cases: list[dict[str, float | int | str]])
 
 def main() -> None:
     args = parse_args()
+    manifest = (
+        ExperimentManifest.load(args.experiment_manifest)
+        if args.experiment_manifest
+        else None
+    )
+    if manifest and manifest.kind is not ExperimentKind.QUALITY_ONLY:
+        raise ValueError(
+            "the quality harness accepts only quality_only manifests; "
+            "link its result from a quality_runtime throughput manifest"
+        )
+    if manifest and args.symmetric_config:
+        raise ValueError(
+            "--symmetric-config cannot override an immutable experiment manifest"
+        )
+    if manifest and args.candidate_option:
+        raise ValueError(
+            "--candidate-option cannot override an immutable experiment manifest"
+        )
+    if args.candidate_option and args.symmetric_config:
+        raise ValueError(
+            "use either --candidate-option or --symmetric-config, not both"
+        )
+    if manifest:
+        if manifest.cohort.get("selector") != "stratified":
+            raise ValueError("quality manifests require cohort.selector='stratified'")
+        args.contexts_per_stratum = int(manifest.cohort["contexts_per_stratum"])
+        args.exploration_seeds = [int(manifest.cohort["selection_seed"])]
     top_ks = list(dict.fromkeys(args.top_ks or [10]))
     if min(top_ks) <= 0 or args.oracle_depth < max(top_ks):
         raise ValueError("--top-k must be positive and --oracle-depth must cover every K")
@@ -1230,7 +1517,16 @@ def main() -> None:
             update_plan_timings=True,
             use_shadow_prices=True,
         )
-        oracle_cache = OracleCache(fingerprint, args.oracle_depth, args.max_states)
+        attempt_fingerprint = oracle_attempt_fingerprint(
+            fingerprint,
+            use_bounded_incumbent=not args.no_bounded_incumbent,
+        )
+        oracle_cache = OracleCache(
+            fingerprint,
+            args.oracle_depth,
+            args.max_states,
+            attempt_fingerprint=attempt_fingerprint,
+        )
         print(f"Oracle cache: {oracle_cache.path}")
     profiles = context_profiles(steps)
     supported = profiles.filter(pl.col("layers") >= 2)
@@ -1259,7 +1555,58 @@ def main() -> None:
         stratum: int(population)
         for stratum, population in audit_supported.group_by("audit_stratum").len().iter_rows()
     }
-    configurations = symmetric_configurations(args)
+    if manifest:
+        configurations: list[tuple[str, dict[str, Any]]] = [
+            ("A", manifest.baseline),
+            ("B", manifest.candidate),
+        ]
+    elif args.candidate_option:
+        baseline_options = top_k_tuning_options(args)
+        configurations = [
+            ("A", baseline_options),
+            (
+                "B",
+                apply_top_k_overrides(
+                    baseline_options,
+                    args.candidate_option,
+                ),
+            ),
+        ]
+    else:
+        configurations = [
+            (
+                label,
+                {
+                    "symmetric_message_limit": message_limit,
+                    "symmetric_state_limit": state_limit,
+                    "symmetric_forward_proposal_limit": proposal_limit,
+                },
+            )
+            for label, message_limit, state_limit, proposal_limit in symmetric_configurations(
+                args
+            )
+        ]
+    recorder = None
+    cohort_identity = None
+    if manifest:
+        seed = int(manifest.cohort["selection_seed"])
+        selected_ids = eligible_context_ids(profiles, args, seed)
+        cohort_identity = manifest.verify_cohort(selected_ids)
+        recorder = RunRecorder(
+            manifest,
+            cohort_identity=cohort_identity,
+            root=args.run_root,
+            metadata={
+                "harness": "compare_bidirectional_top_k_grand_geneve",
+                "contexts": len(selected_ids),
+                "top_ks": top_ks,
+                "oracle_depth": args.oracle_depth,
+                "max_states": args.max_states,
+            },
+        )
+        print(f"Cohort fingerprint: {cohort_identity}")
+        print(f"Run artifact: {recorder.path}")
+        recorder.progress("cohort_ready", contexts=len(selected_ids))
     oracle_memory: dict[int, tuple[pl.DataFrame, dict]] = {}
     if args.compact:
         if args.context_ids:
@@ -1269,18 +1616,42 @@ def main() -> None:
                 "config | seed | K | n | recall | mass | min | zero | "
                 "bounded-ms | wall-s | oracle-hit/miss"
             )
-    for label, message_limit, state_limit, proposal_limit in configurations:
+    results = []
+    for label, options in configurations:
         config_args = argparse.Namespace(**vars(args))
-        config_args.symmetric_message_limit = message_limit
-        config_args.symmetric_state_limit = state_limit
-        config_args.symmetric_forward_proposal_limit = proposal_limit
+        for name, value in options.items():
+            setattr(config_args, name, value)
         if not args.compact and len(configurations) > 1:
-            print(
-                f"\nConfiguration {label}: messages={message_limit}, "
-                f"states={state_limit}, proposals={proposal_limit}"
+            differences = (
+                ", ".join(
+                    f"{name}={options[name]!r}"
+                    for name in manifest.allowed_differences
+                )
+                if manifest
+                else ", ".join(
+                    f"{name}={options[name]!r}"
+                    for name in (
+                        value.partition("=")[0] for value in args.candidate_option
+                    )
+                )
+                if args.candidate_option
+                else ", ".join(f"{name}={value!r}" for name, value in options.items())
             )
+            print(f"\nConfiguration {label}: {differences}")
         for exploration_seed in args.exploration_seeds or [42]:
-            compare_seed(
+            progress_callback = (
+                (
+                    lambda event, **values: recorder.progress(
+                        event,
+                        configuration=label,
+                        seed=exploration_seed,
+                        **values,
+                    )
+                )
+                if recorder
+                else None
+            )
+            result = compare_seed(
                 config_args,
                 label,
                 top_ks,
@@ -1296,7 +1667,66 @@ def main() -> None:
                 population_by_stratum,
                 oracle_cache,
                 oracle_memory,
+                progress_callback,
             )
+            results.append(result)
+            if recorder:
+                recorder.progress(
+                    "configuration_complete",
+                    configuration=label,
+                    seed=exploration_seed,
+                    proven=result["proven"],
+                )
+    payload: dict[str, Any] = {
+        "kind": manifest.kind.value if manifest else "untyped_quality",
+        "cohort_fingerprint": cohort_identity,
+        "results": results,
+    }
+    if manifest:
+        by_configuration = {
+            result["configuration"]: result
+            for result in results
+            if result["status"] == "completed"
+        }
+        if set(by_configuration) == {"A", "B"}:
+            quality_summaries = {
+                label: by_configuration[label]["quality_summary"]
+                for label in ("A", "B")
+            }
+            verdict = quality_verdict(
+                manifest.gates,
+                quality_summaries["A"],
+                quality_summaries["B"],
+            )
+        else:
+            quality_summaries = {}
+            verdict = {
+                "status": "incomplete",
+                "scope": "quality",
+                "failures": [],
+                "incomplete": ["A and B did not both complete"],
+                "gate_results": [],
+            }
+        payload.update(
+            {
+                "hypothesis": manifest.hypothesis,
+                "resolved_configs": {
+                    "A": manifest.baseline,
+                    "B": manifest.candidate,
+                },
+                "quality_summaries": quality_summaries,
+                "verdict": verdict,
+            }
+        )
+        print(f"quality verdict | {verdict['status'].upper()}")
+        for reason in verdict["failures"] + verdict["incomplete"]:
+            print(f"  {reason}")
+        if recorder:
+            recorder.finalize(payload, status=verdict["status"])
+    if args.json_output:
+        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        args.json_output.write_text(json.dumps(payload, indent=2) + "\n")
+        print(f"wrote {args.json_output}")
 
 
 if __name__ == "__main__":

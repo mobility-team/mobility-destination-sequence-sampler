@@ -48,6 +48,13 @@ class TopKReport(TypedDict):
     heuristic_reserve_proposals: int
     seam_refresh_proposals: int
     seam_refresh_states: int
+    pricing_candidate_evaluations: int
+    pricing_feasible_evaluations: int
+    pricing_plans_added: int
+    pricing_pair_evaluations: int
+    pricing_pair_feasible_evaluations: int
+    pricing_pair_plans_added: int
+    pricing_rounds: int
     stitch_pairs: int
     complete_plan_candidates: int
     infeasible_contexts: int
@@ -59,6 +66,7 @@ class TopKReport(TypedDict):
     surface_proposal_ns: int
     factor_map_ns: int
     seam_refresh_ns: int
+    pricing_ns: int
     stitch_ns: int
     materialize_ns: int
     total_search_ns: int
@@ -72,6 +80,7 @@ class ExactTopKReport(TypedDict):
     anchor_conditions_considered: int
     anchor_conditions_pruned: int
     incumbent_contexts: int
+    incumbent_plans_seeded: int
     incumbent_children_considered: int
     children_pruned_by_incumbent: int
     queue_entries_popped: int
@@ -111,6 +120,14 @@ class DestinationPlanSearch:
         continuation_proposal_limit: int = 1,
         seam_refresh_per_prefix: int = 1,
         heuristic_reserve_limit: int = 0,
+        pricing_passes: int = 2,
+        pricing_seed_limit: int = 10,
+        pricing_column_limit: int = 4,
+        pricing_pair_candidate_limit: int = 4,
+        pricing_pair_deep_candidate_limit: int = 8,
+        pricing_pair_deep_min_layers: int = 9,
+        pricing_next_pass_min_new: int = 3,
+        pricing_min_layers: int = 6,
         top_k: int = 10,
         n_threads: int | None = None,
         skip_infeasible: bool = False,
@@ -131,6 +148,7 @@ class DestinationPlanSearch:
         max_states: int = 2_000_000,
         n_threads: int | None = None,
         skip_infeasible: bool = False,
+        use_bounded_incumbent: bool = True,
     ) -> tuple[Any, ExactTopKReport]: ...
 
     def exact_distribution(

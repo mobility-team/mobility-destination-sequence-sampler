@@ -1,13 +1,60 @@
 # Current benchmarks
 
-Release build, Windows, Grand Geneve iteration-5 cache, 2026-07-23. These are
+Release build, Windows, Grand Geneve iteration-5 cache, 2026-07-27. These are
 kernel measurements, not end-to-end Mobility timings.
 
 ## Active bounded top-K
 
+### Routed interacting-pair pricing
+
 Full prepared workload (81,844 contexts, 328,197 steps, 1,110 zones), eight
-threads; active defaults with `factor_map_max_depth=5` and
-`deep_continuation_state_limit=2`:
+threads. The two-cycle interleaved comparison is against the otherwise
+identical single-variable pricing policy:
+
+| Policy | Wall time | Aggregate Rust | Factor-map CPU | Pricing CPU |
+|---|---:|---:|---:|---:|
+| Active routed pair pricing | 41.102 s | 241.539 s | 181.781 s | 25.553 s |
+| Prior single-variable pricing | 39.627 s | 226.614 s | 173.944 s | 19.413 s |
+
+The active policy adds 3.7% wall time and 6.6% aggregate Rust time. On 106
+exact-certified deep contexts, conditional `Mass@10` rises from 0.771 to
+0.821; 15 contexts improve, none regress, and zero-overlap cases fall from 7
+to 5. The router crosses four exact conditional columns per interacting
+variable at depths 6–8 and eight at depth 9 or greater.
+
+### Initial single-variable pricing promotion
+
+Full prepared workload (81,844 contexts, 328,197 steps, 1,110 zones), eight
+threads. This is a one-cycle interleaved A/B comparison of the active adaptive
+pricing policy against the same search with pricing disabled:
+
+| Policy | Wall time | Aggregate Rust | Factor-map CPU | Pricing CPU |
+|---|---:|---:|---:|---:|
+| Active adaptive pricing | 48.349 s | 286.675 s | 221.147 s | 23.702 s |
+| Same search, pricing disabled | 43.805 s | 240.532 s | 201.999 s | 0 s |
+
+Pricing adds 10.4% wall time in this full-workload run. Two 5,000-context
+repeats measured -1.4% and +5.4% wall time, with the longer repeat adding
+12.5% aggregate Rust time. The active router runs its first pass only at depth
+6 or greater and runs a second pass only when the first contributes at least
+three new surviving plans.
+
+In an all-depth audit with ten samples per stratum, the oracle proved 258 of
+396 contexts; 246 also had bounded results. Adaptive pricing raises
+conditional `Mass@10` from 0.793 to 0.850 and lowers zero-overlap cases from 15
+to 9. The post-stratified certified estimate rises from 0.847 to 0.872.
+Depth-6 through depth-10 conditional gains are respectively
++0.109/+0.252/+0.079/+0.129/+0.118.
+
+The oracle itself now uses active bounded plans as exact-rescored incumbents.
+On the two-per-stratum pilot, solved contexts rose from 40 to 56 and
+state-limited contexts fell from 30 to 14, with identical exact outputs where
+both modes completed.
+
+## Pre-pricing active baseline
+
+Full prepared workload, eight threads; active defaults at the time with
+`factor_map_max_depth=5` and `deep_continuation_state_limit=2`:
 
 | Policy | Wall time | Aggregate Rust | Factor-map CPU |
 |---|---:|---:|---:|

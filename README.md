@@ -17,8 +17,10 @@ oracle. Mobility prepares inputs; this package owns destination choice.
 is at most depth 5, and bounded attractive, OD-near, and deterministic
 exploration proposals for longer uninterrupted tours; it carries repeated
 anchors and ranks stitched complete plans by
-the full rigidity-aware utility. See [`DESIGN.md`](DESIGN.md) for schemas and
-invariants.
+the full rigidity-aware utility. Deep contexts additionally use adaptive exact
+single-variable and interacting-pair replacements on the best stitched plans,
+with full reranking.
+See [`DESIGN.md`](DESIGN.md) for schemas and invariants.
 
 Only those paths are in the working tree. Particle, exhaustive-sampling, and
 second-order research is preserved by the `research-archive-2026-07-21` Git

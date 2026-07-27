@@ -343,19 +343,44 @@ pub(super) fn search_context_once(
         scratch.report.stitch_ns += started.elapsed().as_nanos() as u64;
     }
     scratch.report.completed_plans = completed.len() as u64;
-    let mut output = OutputTable::default();
     let mut seen = BTreeSet::new();
-    let materialize_started = inputs.options.profile.then(Instant::now);
+    let reconstruction_started = inputs.options.profile.then(Instant::now);
+    let initial_limit = if inputs.options.pricing_passes > 0
+        && inputs.context.steps.len() >= inputs.options.pricing_min_layers
+    {
+        (inputs.options.result_limit as usize).max(inputs.options.pricing_seed_limit)
+    } else {
+        inputs.options.result_limit as usize
+    };
+    let mut ranked_plans = Vec::with_capacity(initial_limit);
     for completed in completed {
         let mut zones = prefix_zones(&prefix_nodes, completed.prefix);
         zones.extend(suffix_zones(&backward.nodes, completed.suffix));
         if !seen.insert(zones.clone()) {
             continue;
         }
-        append_plan(&mut output, &inputs, &zones, seen.len() as u32);
-        if seen.len() == inputs.options.result_limit as usize {
+        ranked_plans.push(RankedZones {
+            score: completed.score,
+            zones,
+        });
+        if ranked_plans.len() == initial_limit {
             break;
         }
+    }
+    if let Some(started) = reconstruction_started {
+        scratch.report.materialize_ns += started.elapsed().as_nanos() as u64;
+    }
+    let ranked_plans = price_complete_plans(
+        &inputs,
+        &mut scratch.report,
+        &mut scratch.factor_map_cache,
+        &mut scratch.factor_map_ranked,
+        ranked_plans,
+    )?;
+    let materialize_started = inputs.options.profile.then(Instant::now);
+    let mut output = OutputTable::default();
+    for (draw, plan) in ranked_plans.into_iter().enumerate() {
+        append_plan(&mut output, &inputs, &plan.zones, draw as u32 + 1);
     }
     if let Some(started) = materialize_started {
         scratch.report.materialize_ns += started.elapsed().as_nanos() as u64;

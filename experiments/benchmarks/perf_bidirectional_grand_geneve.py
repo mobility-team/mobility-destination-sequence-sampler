@@ -215,6 +215,12 @@ def main() -> None:
         f"continuation={args.continuation_state_limit}x{args.continuation_proposal_limit} "
         f"deep-continuation={args.deep_continuation_state_limit} "
         f"seam-refresh={args.seam_refresh_per_prefix} "
+        f"pricing={args.pricing_passes}x{args.pricing_column_limit} "
+        f"pricing-pair-limit={args.pricing_pair_candidate_limit} "
+        f"pricing-deep-pair={args.pricing_pair_deep_candidate_limit}"
+        f"@{args.pricing_pair_deep_min_layers}+ "
+        f"next-pass-min-new={args.pricing_next_pass_min_new} "
+        f"pricing-min-layers={args.pricing_min_layers} "
         f"threads={args.threads}"
     )
     print(
@@ -227,6 +233,10 @@ def main() -> None:
         f"{bidirectional_report['heuristic_reserve_proposals']} triggers/proposals "
         f"refresh-proposals={bidirectional_report['seam_refresh_proposals']} "
         f"refresh-states={bidirectional_report['seam_refresh_states']} "
+        f"pricing-rounds={bidirectional_report['pricing_rounds']} "
+        f"pricing-evaluations={bidirectional_report['pricing_candidate_evaluations']} "
+        f"pricing-pair-evaluations={bidirectional_report['pricing_pair_evaluations']} "
+        f"pricing-added={bidirectional_report['pricing_plans_added']} "
         f"stitch-pairs={bidirectional_report['stitch_pairs']} "
         f"infeasible={bidirectional_report['infeasible_contexts']}"
     )
@@ -274,6 +284,7 @@ def main() -> None:
                 ),
                 ("factor_map", bidirectional_report["factor_map_ns"]),
                 ("seam_refresh", bidirectional_report["seam_refresh_ns"]),
+                ("pricing", bidirectional_report["pricing_ns"]),
                 ("stitch", bidirectional_report["stitch_ns"]),
                 ("materialize", bidirectional_report["materialize_ns"]),
             ):

@@ -41,7 +41,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=9, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -67,6 +67,14 @@ impl DestinationPlanSearch {
         continuation_proposal_limit: usize,
         seam_refresh_per_prefix: usize,
         heuristic_reserve_limit: usize,
+        pricing_passes: usize,
+        pricing_seed_limit: usize,
+        pricing_column_limit: usize,
+        pricing_pair_candidate_limit: usize,
+        pricing_pair_deep_candidate_limit: usize,
+        pricing_pair_deep_min_layers: usize,
+        pricing_next_pass_min_new: usize,
+        pricing_min_layers: usize,
         top_k: u32,
         n_threads: Option<usize>,
         skip_infeasible: bool,
@@ -101,6 +109,17 @@ impl DestinationPlanSearch {
         if factor_map_max_depth < 2 {
             return Err(SamplerError::InvalidInput(
                 "factor_map_max_depth must be at least 2".to_string(),
+            )
+            .into());
+        }
+        if pricing_passes > 0
+            && (pricing_seed_limit == 0
+                || pricing_column_limit == 0
+                || pricing_min_layers < 2
+                || (pricing_pair_deep_candidate_limit > 0 && pricing_pair_deep_min_layers < 2))
+        {
+            return Err(SamplerError::InvalidInput(
+                "pricing seed/column limits must be positive and pricing layer thresholds must be at least 2 when their channels are enabled".to_string(),
             )
             .into());
         }
@@ -148,6 +167,14 @@ impl DestinationPlanSearch {
                     continuation_proposal_limit,
                     seam_refresh_per_prefix,
                     heuristic_reserve_limit,
+                    pricing_passes,
+                    pricing_seed_limit,
+                    pricing_column_limit,
+                    pricing_pair_candidate_limit,
+                    pricing_pair_deep_candidate_limit,
+                    pricing_pair_deep_min_layers,
+                    pricing_next_pass_min_new,
+                    pricing_min_layers,
                     profile: collect_profile,
                     active_trace,
                 },
@@ -165,7 +192,7 @@ impl DestinationPlanSearch {
     }
 
     /// Prove the highest-utility complete plans on a bounded exact workload.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, top_k=10, max_states=2_000_000, n_threads=None, skip_infeasible=false))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, top_k=10, max_states=2_000_000, n_threads=None, skip_infeasible=false, use_bounded_incumbent=true))]
     #[allow(clippy::too_many_arguments)]
     fn exact_top_k(
         &self,
@@ -179,6 +206,7 @@ impl DestinationPlanSearch {
         max_states: usize,
         n_threads: Option<usize>,
         skip_infeasible: bool,
+        use_bounded_incumbent: bool,
     ) -> PyResult<PyObject> {
         validate_logit_scale(logit_scale)?;
         if top_k == 0 || max_states == 0 {
@@ -195,6 +223,23 @@ impl DestinationPlanSearch {
             skip_infeasible,
         };
         let (output, report) = py.allow_threads(|| {
+            let seed_output = if use_bounded_incumbent && top_k <= u32::MAX as usize {
+                let mut seed_parameters = parameters;
+                seed_parameters.skip_infeasible = true;
+                Some(
+                    search_top_k_all(
+                        &self.graph,
+                        &self.destination_index,
+                        &contexts,
+                        seed_parameters,
+                        TopKOptions::active_incumbent(top_k as u32),
+                        n_threads,
+                    )?
+                    .0,
+                )
+            } else {
+                None
+            };
             search_reference_top_k(
                 &self.graph,
                 &self.destination_index,
@@ -203,6 +248,7 @@ impl DestinationPlanSearch {
                 top_k,
                 max_states,
                 n_threads,
+                seed_output.as_ref(),
             )
         })?;
         Ok(PyTuple::new(
@@ -349,6 +395,22 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     )?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
+    result.set_item(
+        "pricing_candidate_evaluations",
+        report.pricing_candidate_evaluations,
+    )?;
+    result.set_item(
+        "pricing_feasible_evaluations",
+        report.pricing_feasible_evaluations,
+    )?;
+    result.set_item("pricing_plans_added", report.pricing_plans_added)?;
+    result.set_item("pricing_pair_evaluations", report.pricing_pair_evaluations)?;
+    result.set_item(
+        "pricing_pair_feasible_evaluations",
+        report.pricing_pair_feasible_evaluations,
+    )?;
+    result.set_item("pricing_pair_plans_added", report.pricing_pair_plans_added)?;
+    result.set_item("pricing_rounds", report.pricing_rounds)?;
     result.set_item("stitch_pairs", report.stitch_pairs)?;
     result.set_item("complete_plan_candidates", report.completed_plans)?;
     result.set_item("infeasible_contexts", report.infeasible_contexts)?;
@@ -360,6 +422,7 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("surface_proposal_ns", report.surface_proposal_ns)?;
     result.set_item("factor_map_ns", report.factor_map_ns)?;
     result.set_item("seam_refresh_ns", report.seam_refresh_ns)?;
+    result.set_item("pricing_ns", report.pricing_ns)?;
     result.set_item("stitch_ns", report.stitch_ns)?;
     result.set_item("materialize_ns", report.materialize_ns)?;
     result.set_item("total_search_ns", report.total_search_ns)?;
@@ -419,6 +482,7 @@ fn heap_report_to_dict(py: Python<'_>, report: &HeapSearchReport) -> PyResult<Py
     )?;
     result.set_item("anchor_conditions_pruned", report.anchor_conditions_pruned)?;
     result.set_item("incumbent_contexts", report.incumbent_contexts)?;
+    result.set_item("incumbent_plans_seeded", report.incumbent_plans_seeded)?;
     result.set_item(
         "incumbent_children_considered",
         report.incumbent_children_considered,

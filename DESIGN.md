@@ -30,9 +30,12 @@ each visit still receives activity/travel utility.
 api.rs -> search_top_k_all() -> search_context()
 ```
 
-- `top_k/mod.rs`: frontiers, continuation guidance, refresh, stitch.
+- `top_k/mod.rs`: shared search state and per-context orchestration.
 - `top_k/candidates.rs`: heuristic and binned-surface proposals/cache;
   `top_k/mod.rs` also owns factor-map proposal composition.
+- `top_k/pricing.rs`: depth-routed exact replacements from stitched complete
+  paths, including bounded interacting-pair neighborhoods, followed by full
+  shared-scorer reranking.
 - New passes take `SearchInputs` + `SearchScratch`, not long argument lists.
 - `oracle.rs`: exact top-K oracle; it proves or fails at
   `max_states`, never approximates.
@@ -49,3 +52,6 @@ factor i = destination[i - 1] -> destination[i] -> destination[i + 1]
 Forward-to-backward refresh may add activity-correct states but must not evict
 the reverse/home-oriented frontier. Proposal policies, including factor maps,
 change support only; every retained factor still uses the shared exact scorer.
+Post-stitch pricing obeys the same rule. A repeated anchor is replaced as one
+group, interacting groups are changed atomically, and every retained complete
+plan is rescored before final ranking.

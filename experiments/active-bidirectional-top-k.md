@@ -77,3 +77,80 @@ The local-score cache now uses a deterministic hasher for trusted integer
 tuple keys. Five 20,000-context release runs improve median wall time by 3.8%
 and aggregate Rust search time by 4.9%. Applying the hasher to factor-map
 caches did not help, and packing the local key regressed runtime.
+
+## Adaptive exact path pricing (2026-07-27)
+
+The active policy adds a depth-routed completed-path pass:
+`pricing_passes=2`, `pricing_seed_limit=10`, `pricing_column_limit=4`,
+`pricing_next_pass_min_new=3`, and `pricing_min_layers=6`. For an unanchored
+layer it reuses the exact destination-resolution factor map to rank
+single-variable replacements. Repeated anchors are changed as one group and
+all affected factors are scored exactly. Every retained column is fully
+rescored before final ranking.
+
+This is dynamic support generated around complete paths, not another static
+candidate-pool expansion. It directly targets the high-quality columns that
+the bounded forward/reverse proposal intersection missed. That distinction is
+consistent with large-neighborhood search and column-generation views of
+large-scale combinatorial inference: search a tractable incumbent neighborhood, price
+promising missing structures, and rerank with the original objective
+([Song et al., 2020](https://proceedings.neurips.cc/paper/2020/hash/e769e03a9d329b2e864b4bf4ff54ff39-Abstract.html);
+[Desrosiers and Lübbecke, 2005](https://doi.org/10.1007/0-387-25486-2_1)).
+
+On the ten-per-stratum all-depth audit, the seeded oracle proved 258 of 396
+sampled contexts and 246 had bounded results. Relative to pricing disabled,
+conditional `Mass@10` improves from 0.793 to 0.850, zero-overlap cases fall
+from 15 to 9, and the post-stratified certified estimate improves from 0.847
+to 0.872. Conditional depth means improve by +0.109 at depth 6, +0.252 at
+depth 7, +0.079 at depth 8, +0.129 at depth 9, and +0.118 at depth 10.
+
+The router study found that depth 6 or greater covers 20.5% of the workload.
+Requiring at least three new surviving plans before a second pass routes 34.6%
+of deep cases—about 7% of the full workload—while capturing 96.6% of the
+observed second-pass quality gain.
+
+On the full 81,844-context release workload, adaptive pricing measured
+48.349 s wall / 286.675 s aggregate Rust versus 43.805 s / 240.532 s with
+pricing disabled: +10.4% wall and +19.2% Rust. Exact factor-map reuse reduced
+the pass from the earlier scalar prototype; two 5,000-context repeats measured
+-1.4% and +5.4% wall. The policy is promoted because the large and consistent
+deep-context gain clears the predeclared 15% full-workload wall-time ceiling.
+
+The exact oracle now exact-rescores active bounded results as initial
+branch-and-bound incumbents. In the two-per-stratum pilot this increased solved
+contexts from 40 to 56 and reduced state-budget failures from 30 to 14.
+Seeded and cold modes returned identical exact top-K results wherever both
+completed. The cache now stores completed certificates under input and exact
+semantics only, while capped attempts separately fingerprint the active
+initializer and state budget. This follows the
+well-established sensitivity of m-best branch-and-bound to heuristic strength
+([Dechter, Flerova, and Marinescu, 2012](https://ojs.aaai.org/index.php/AAAI/article/view/8405)).
+
+## Routed interacting-pair pricing (2026-07-27)
+
+Single-variable pricing still misses plans where two individually weak
+replacements are strong together. The promoted extension crosses the best
+exact conditional columns only for variable groups whose affected factor
+windows overlap. It prices the union of affected factors, keeps at most the
+working top-K joint columns per neighborhood, then fully rescores every
+survivor. Repeated anchors remain atomic groups.
+
+The active router uses four conditional candidates per variable at depths 6–8
+and eight from depth 9 onward. On 106 exact-certified deep contexts, the prior
+active policy scores conditional `Mass@10` 0.771. Uniform pair limits 4 and 8
+score 0.811 and 0.823; the routed 4/8 policy scores 0.821. It improves 15
+contexts with no losses and reduces zero-overlap cases from 7 to 5. The largest
+recoveries include 0.000→1.000, 0.000→0.909, 0.094→0.813, and 0.064→0.760.
+
+Across all 250 bounded-complete certified cases, uniform limits 4 and 8 raise
+conditional mass from 0.841 to 0.858/0.863 and the post-stratified estimate
+from 0.871 to 0.876/0.878. The routed policy retains almost all of the
+limit-8 deep gain while halving pair evaluations.
+
+The final full-workload two-cycle comparison uses 81,844 contexts and eight
+threads. The prior active policy has median 39.627 s wall / 226.614 s aggregate
+Rust; routed pair pricing has 41.102 s / 241.539 s: +3.7% wall and +6.6% Rust.
+Pricing CPU rises from 19.413 to 25.553 seconds. A 20,000-context calibrated
+comparison measured +5.6% wall. The routed policy is promoted: its large,
+one-sided deep-quality gain clears the output-changing quality gate at a small
+full-workload wall-time increment.

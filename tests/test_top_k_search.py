@@ -49,7 +49,7 @@ def test_two_step_top_k_matches_the_exact_oracle() -> None:
         frontier_width=1,
         proposal_limit_per_source=1,
     )
-    exact, _ = search.exact_top_k(**common, max_states=100)
+    exact, oracle_report = search.exact_top_k(**common, max_states=100)
 
     def plans(frame: pl.DataFrame) -> list[tuple[int, ...]]:
         return [
@@ -58,6 +58,7 @@ def test_two_step_top_k_matches_the_exact_oracle() -> None:
         ]
 
     assert plans(bounded) == plans(exact)
+    assert oracle_report["incumbent_plans_seeded"] == 0
     assert report["complete_plan_candidates"] == 2
     assert report["forward_proposals_evaluated"] == 2
     assert report["stitch_pairs"] == 0
@@ -326,7 +327,23 @@ def test_bidirectional_top_k_matches_exact_when_the_beam_covers_the_toy_domain()
         candidate_strategy="factor_map",
         seam_refresh_per_prefix=0,
     )
-    exact, _ = search.exact_top_k(**common, max_states=100)
+    priced, pricing_report = search.top_k(
+        **common,
+        exploration_seed=13,
+        frontier_width=8,
+        proposal_limit_per_source=8,
+        candidate_strategy="factor_map",
+        seam_refresh_per_prefix=0,
+        pricing_passes=2,
+        pricing_pair_candidate_limit=2,
+        pricing_min_layers=4,
+    )
+    exact, seeded_report = search.exact_top_k(**common, max_states=100)
+    exact_without_seed, unseeded_report = search.exact_top_k(
+        **common,
+        max_states=100,
+        use_bounded_incumbent=False,
+    )
 
     def plans(frame: pl.DataFrame) -> list[tuple[int, ...]]:
         return [
@@ -334,7 +351,111 @@ def test_bidirectional_top_k_matches_exact_when_the_beam_covers_the_toy_domain()
             for plan in frame.partition_by("draw_id", maintain_order=True)
         ]
 
-    assert plans(bounded) == plans(exact)
+    assert plans(bounded) == plans(priced) == plans(exact) == plans(exact_without_seed)
+    assert pricing_report["pricing_candidate_evaluations"] > 0
+    assert pricing_report["pricing_feasible_evaluations"] > 0
+    assert pricing_report["pricing_pair_evaluations"] > 0
+    assert pricing_report["pricing_pair_feasible_evaluations"] > 0
+    assert pricing_report["pricing_rounds"] == 1
+    assert seeded_report["incumbent_plans_seeded"] == 8
+    assert unseeded_report["incumbent_plans_seeded"] == 0
+
+
+def test_interacting_pair_pricing_crosses_a_single_replacement_valley() -> None:
+    zones = [0, 1, 2]
+    pair_cost = {
+        (0, 0): 0.0,
+        (0, 1): 0.0,
+        (0, 2): 2.0,
+        (1, 0): 0.0,
+        (1, 1): 0.0,
+        (1, 2): 10.0,
+        (2, 0): 2.0,
+        (2, 1): 10.0,
+        (2, 2): 0.0,
+    }
+    od_pairs = [(origin, destination) for origin in zones for destination in zones]
+    od_costs = pl.DataFrame(
+        {
+            "origin": [origin for origin, _ in od_pairs],
+            "destination": [destination for _, destination in od_pairs],
+            "cost": [pair_cost[pair] for pair in od_pairs],
+            "time": [0.0] * len(od_pairs),
+        }
+    )
+    destination_inputs = pl.DataFrame(
+        {
+            "activity_id": [10, 10, 20, 20],
+            "destination": [1, 2, 1, 2],
+            "opportunity_capacity": [100.0, 1.0, 100.0, 1.0],
+            "country_value_coefficient": [0.0] * 4,
+            "saturation_utility": [1.0] * 4,
+            "shadow_price": [0.0, 5.0, 0.0, 5.0],
+        }
+    )
+    steps = pl.DataFrame(
+        {
+            "context_id": [1] * 3,
+            "layer": [0, 1, 2],
+            "activity_id": [10, 20, 0],
+            "anchor_id": [None] * 3,
+            "fixed_destination": [None, None, 0],
+            "departure_time": [8.0, 11.0, 14.0],
+            "arrival_time": [8.0, 11.0, 14.0],
+            "arrival_time_rigidity": [0.0] * 3,
+            "departure_time_rigidity": [0.0] * 3,
+            "next_departure_time": [11.0, 14.0, 15.0],
+            "duration_per_person": [2.0, 2.0, 0.0],
+            "value_of_time": [1.0, 1.0, 0.0],
+            "mean_duration_per_person": [1.0] * 3,
+            "min_activity_time": [0.5] * 3,
+        }
+    )
+    common = {
+        "steps": steps,
+        "initial_locations": pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
+        "logit_scale": 1.0,
+        "update_plan_timings": False,
+        "use_shadow_prices": True,
+        "top_k": 1,
+    }
+    search = DestinationPlanSearch(od_costs=od_costs, destination_inputs=destination_inputs)
+    pricing_options = {
+        "exploration_seed": 13,
+        "frontier_width": 1,
+        "proposal_limit_per_source": 1,
+        "candidate_strategy": "heuristic",
+        "continuation_state_limit": 1,
+        "continuation_proposal_limit": 1,
+        "seam_refresh_per_prefix": 0,
+        "pricing_passes": 1,
+        "pricing_seed_limit": 1,
+        "pricing_column_limit": 1,
+        "pricing_pair_deep_candidate_limit": 0,
+        "pricing_min_layers": 3,
+    }
+    scalar, _ = search.top_k(
+        **common,
+        **pricing_options,
+        pricing_pair_candidate_limit=0,
+    )
+    paired, report = search.top_k(
+        **common,
+        **pricing_options,
+        pricing_pair_candidate_limit=1,
+    )
+    exact, _ = search.exact_top_k(
+        **common,
+        max_states=100,
+        use_bounded_incumbent=False,
+    )
+
+    def plan(frame: pl.DataFrame) -> tuple[int, ...]:
+        return tuple(frame.sort("layer")["destination"].to_list())
+
+    assert plan(scalar) == (1, 1, 0)
+    assert plan(paired) == plan(exact) == (2, 2, 0)
+    assert report["pricing_pair_plans_added"] > 0
 
 
 def test_home_bounded_factor_maps_keep_a_cross_home_anchor() -> None:
@@ -433,6 +554,7 @@ def test_exact_oracle_fails_explicitly_at_its_state_budget() -> None:
             use_shadow_prices=False,
             top_k=1,
             max_states=1,
+            use_bounded_incumbent=False,
         )
 
 

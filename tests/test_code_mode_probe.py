@@ -33,6 +33,7 @@ def test_compact_report_retains_failures_without_the_raw_tables() -> None:
         top_k=10,
         oracle_depth=10,
         max_states=500_000,
+        use_bounded_incumbent=True,
     )
 
     assert report["summary"] == {

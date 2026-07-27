@@ -8,6 +8,7 @@ pub(super) struct FactorMapRequest<'a> {
     pub(super) anchor_slot: Option<usize>,
     pub(super) anchors: &'a [Option<usize>],
     pub(super) candidate_limit: usize,
+    pub(super) ranked_output: bool,
 }
 
 pub(super) struct NextFactorMapRequest<'a> {
@@ -452,9 +453,17 @@ pub(super) fn factor_map_candidates(
             ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
             ranked.truncate(request.candidate_limit);
         }
+        if request.ranked_output {
+            ranked.sort_unstable_by(compare);
+        }
         result.extend(ranked.iter().map(|&(_, destination)| destination));
     }
-    result.sort_unstable();
-    result.dedup();
+    if request.ranked_output {
+        let mut seen = BTreeSet::new();
+        result.retain(|destination| seen.insert(*destination));
+    } else {
+        result.sort_unstable();
+        result.dedup();
+    }
     Ok(result)
 }

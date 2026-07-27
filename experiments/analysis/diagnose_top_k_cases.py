@@ -12,8 +12,6 @@ import polars as pl
 from mobility_destination_sequence_sampler import DestinationPlanSearch
 
 from experiments.analysis.compare_bidirectional_top_k_grand_geneve import (
-    OracleCache,
-    oracle_input_fingerprint,
     ranked_plans,
     retained_probability_mass,
 )
@@ -24,6 +22,11 @@ from experiments.benchmarks.perf_grand_geneve_cache import (
     prepare_destination_inputs,
     prepare_od_costs,
     resolve_snapshot_files,
+)
+from experiments.oracle_cache import (
+    OracleCache,
+    oracle_attempt_fingerprint,
+    oracle_input_fingerprint,
 )
 
 
@@ -148,7 +151,15 @@ def main() -> None:
         update_plan_timings=True,
         use_shadow_prices=True,
     )
-    oracle_cache = OracleCache(fingerprint, args.oracle_depth, args.max_states)
+    oracle_cache = OracleCache(
+        fingerprint,
+        args.oracle_depth,
+        args.max_states,
+        attempt_fingerprint=oracle_attempt_fingerprint(
+            fingerprint,
+            use_bounded_incumbent=True,
+        ),
+    )
 
     if not args.summary_only:
         print(

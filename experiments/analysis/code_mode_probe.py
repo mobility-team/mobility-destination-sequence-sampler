@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
         help="exact support retained locally for each context; must be at least --top-k",
     )
     parser.add_argument("--max-states", type=int, default=500_000)
+    parser.add_argument(
+        "--no-bounded-incumbent",
+        action="store_true",
+        help="disable exact rescoring of active bounded plans as oracle lower bounds",
+    )
     parser.add_argument("--exploration-seed", type=int, default=42)
     parser.add_argument(
         "--json-output",
@@ -79,7 +84,12 @@ def compare_plans(
 
 
 def compact_report(
-    cases: list[dict[str, Any]], *, top_k: int, oracle_depth: int, max_states: int
+    cases: list[dict[str, Any]],
+    *,
+    top_k: int,
+    oracle_depth: int,
+    max_states: int,
+    use_bounded_incumbent: bool,
 ) -> dict[str, Any]:
     """Create the only object a caller needs to receive from the batch."""
     compared = [case for case in cases if case["outcome"] == "compared"]
@@ -90,6 +100,7 @@ def compact_report(
             "top_k": top_k,
             "oracle_depth": oracle_depth,
             "max_states": max_states,
+            "use_bounded_incumbent": use_bounded_incumbent,
         },
         "summary": {
             "requested_contexts": len(cases),
@@ -151,6 +162,7 @@ def main() -> None:
                 max_states=args.max_states,
                 n_threads=1,
                 skip_infeasible=False,
+                use_bounded_incumbent=not args.no_bounded_incumbent,
             )
         except ValueError as error:
             cases.append(
@@ -183,6 +195,12 @@ def main() -> None:
                     "layers": context_steps.height,
                     "outcome": "bounded_failed",
                     "oracle_states_pushed": int(oracle_report["states_pushed"]),
+                    "oracle_incumbent_plans_seeded": int(
+                        oracle_report["incumbent_plans_seeded"]
+                    ),
+                    "oracle_children_pruned_by_incumbent": int(
+                        oracle_report["children_pruned_by_incumbent"]
+                    ),
                 }
             )
             continue
@@ -192,6 +210,12 @@ def main() -> None:
                 "layers": context_steps.height,
                 "outcome": "compared",
                 "oracle_states_pushed": int(oracle_report["states_pushed"]),
+                "oracle_incumbent_plans_seeded": int(
+                    oracle_report["incumbent_plans_seeded"]
+                ),
+                "oracle_children_pruned_by_incumbent": int(
+                    oracle_report["children_pruned_by_incumbent"]
+                ),
                 "bounded_search_ms": round(bounded_report["total_search_ns"] / 1e6, 3),
                 **compare_plans(ranked_plans(oracle_table), ranked_plans(bounded_table), args.top_k),
             }
@@ -202,6 +226,7 @@ def main() -> None:
         top_k=args.top_k,
         oracle_depth=args.oracle_depth,
         max_states=args.max_states,
+        use_bounded_incumbent=not args.no_bounded_incumbent,
     )
     encoded = json.dumps(report, separators=(",", ":"), sort_keys=True)
     if args.json_output:

@@ -642,23 +642,31 @@ def analyze_cached_exact_outputs(
         update_plan_timings=True,
         use_shadow_prices=True,
     )
-    cache_path = (
-        Path("experiments/.cache/oracle-top-k") / fingerprint
-    )
+    cache_root = Path("experiments/.cache/oracle-top-k")
+    cache_paths = [
+        cache_root / "certificates" / fingerprint,
+        cache_root / fingerprint,
+    ]
     pattern = re.compile(
-        r"context-(?P<context>\d+)-k(?P<k>\d+)-states-(?P<states>\d+)\.parquet"
+        r"context-(?P<context>\d+)-k(?P<k>\d+)"
+        r"(?:-states-(?P<states>\d+))?\.parquet"
     )
     best: dict[int, tuple[int, int, Path]] = {}
-    for path in cache_path.glob("*.parquet"):
-        match = pattern.fullmatch(path.name)
-        if match is None:
-            continue
-        context_id = int(match.group("context"))
-        priority = (int(match.group("k")), int(match.group("states")), path)
-        if context_id not in best or priority[:2] > best[context_id][:2]:
-            best[context_id] = priority
+    for cache_path in cache_paths:
+        for path in cache_path.glob("*.parquet"):
+            match = pattern.fullmatch(path.name)
+            if match is None:
+                continue
+            context_id = int(match.group("context"))
+            priority = (
+                int(match.group("k")),
+                int(match.group("states") or 0),
+                path,
+            )
+            if context_id not in best or priority[:2] > best[context_id][:2]:
+                best[context_id] = priority
     if not best:
-        print(f"\nNo cached exact outputs at {cache_path}")
+        print(f"\nNo cached exact outputs at {cache_paths[0]}")
         return
     tables = [
         pl.read_parquet(priority[2]).filter(pl.col("draw_id") <= 10)
@@ -679,7 +687,7 @@ def analyze_cached_exact_outputs(
         destination_inputs,
     )
     print_location_summary(
-        f"CACHED EXACT TOP-10 LOCATION ({cache_path}, one certificate/context)",
+        f"CACHED EXACT TOP-10 LOCATION ({cache_paths[0]}, one certificate/context)",
         located,
         10,
     )

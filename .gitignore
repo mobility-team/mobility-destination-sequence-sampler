@@ -59,6 +59,8 @@ htmlcov/
 .coverage.*
 .cache
 experiments/.cache/
+/experiments/runs/*
+!/experiments/runs/README.md
 nosetests.xml
 coverage.xml
 *.cover

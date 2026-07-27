@@ -22,6 +22,14 @@ ACTIVE_TOP_K_DEFAULTS = {
     "continuation_proposal_limit": 1,
     "seam_refresh_per_prefix": 1,
     "heuristic_reserve_limit": 0,
+    "pricing_passes": 2,
+    "pricing_seed_limit": 10,
+    "pricing_column_limit": 4,
+    "pricing_pair_candidate_limit": 4,
+    "pricing_pair_deep_candidate_limit": 8,
+    "pricing_pair_deep_min_layers": 9,
+    "pricing_next_pass_min_new": 3,
+    "pricing_min_layers": 6,
 }
 
 
@@ -98,8 +106,68 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         default=ACTIVE_TOP_K_DEFAULTS["heuristic_reserve_limit"],
         help="add this many heuristic candidates when factor-map and heuristic support share fewer than this many zones",
     )
+    parser.add_argument(
+        "--pricing-passes",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_passes"],
+    )
+    parser.add_argument(
+        "--pricing-seed-limit",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_seed_limit"],
+    )
+    parser.add_argument(
+        "--pricing-column-limit",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_column_limit"],
+    )
+    parser.add_argument(
+        "--pricing-pair-candidate-limit",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_pair_candidate_limit"],
+    )
+    parser.add_argument(
+        "--pricing-pair-deep-candidate-limit",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_pair_deep_candidate_limit"],
+    )
+    parser.add_argument(
+        "--pricing-pair-deep-min-layers",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_pair_deep_min_layers"],
+    )
+    parser.add_argument(
+        "--pricing-next-pass-min-new",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_next_pass_min_new"],
+    )
+    parser.add_argument(
+        "--pricing-min-layers",
+        type=int,
+        default=ACTIVE_TOP_K_DEFAULTS["pricing_min_layers"],
+    )
 
 
 def top_k_tuning_options(args: argparse.Namespace) -> dict[str, Any]:
     """Return the shared tuning fields in the names accepted by ``top_k``."""
     return {name: getattr(args, name) for name in ACTIVE_TOP_K_DEFAULTS}
+
+
+def apply_top_k_overrides(
+    baseline: dict[str, Any],
+    values: list[str],
+) -> dict[str, Any]:
+    """Apply compact NAME=VALUE overrides for fast exploratory A/B runs."""
+    options = dict(baseline)
+    for value in values:
+        name, separator, raw = value.partition("=")
+        if not separator or name not in options:
+            raise ValueError(f"override must name an active top-K option: {value}")
+        current = options[name]
+        if isinstance(current, int):
+            options[name] = int(raw)
+        elif isinstance(current, float):
+            options[name] = float(raw)
+        else:
+            options[name] = raw
+    return options

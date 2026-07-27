@@ -135,6 +135,7 @@ pub(super) fn forward_beam(
                         anchor_slot: candidate_slot,
                         anchors: &parent.anchors,
                         candidate_limit: per_map_limit,
+                        ranked_output: false,
                     };
                     result.extend(factor_map_candidates(
                         inputs,
@@ -190,6 +191,7 @@ pub(super) fn forward_beam(
                             anchor_slot: candidate_slot,
                             anchors: &parent.anchors,
                             candidate_limit: per_map_limit,
+                            ranked_output: false,
                         },
                         &backward.nodes,
                         factor_map_cache,

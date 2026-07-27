@@ -17,7 +17,12 @@ factor maps when every home-bounded tour is at most
 `factor_map_max_depth=5`; a longer uninterrupted tour uses the bounded
 heuristic proposal pool with two exact continuation states. Fixed home returns
 remain part of the full scorer and do not make tours independently solvable. A
-two-step context is a direct exact scan.
+two-step context is a direct exact scan. After stitching, contexts with at
+least six layers price exact single-variable replacements from the best
+complete plans. At most two rounds run; the second requires at least three new
+surviving plans from the first. Each round also crosses exact conditional
+columns for interacting variable pairs: four candidates per variable normally,
+and eight from depth 9 onward.
 
 ## One-context flow
 
@@ -30,7 +35,9 @@ Python tables
   -> optional partial symmetric guidance
   -> forward beam and proposal support
   -> optional forward-to-backward seam refresh
-  -> exact boundary stitch, deduplicate, materialize
+  -> exact boundary stitch and deduplicate
+  -> depth-routed exact path pricing
+  -> materialize
 ```
 
 The implementation entry is `search_top_k_all()` and the per-context
@@ -39,8 +46,9 @@ all caches and mutable search state are per context.
 
 `rust/top_k/mod.rs` owns shared private state; its explicit child modules own
 one search phase each (`factor_maps`, `backward`, `forward`, `refresh`, and
-`stitch`). Keep cross-phase interfaces `pub(super)` and narrow: a phase must
-not reach into another phase's cache implementation directly.
+`stitch`); `pricing` owns the post-stitch completed-path pass. Keep cross-phase
+interfaces `pub(super)` and narrow: a phase must not reach into another phase's
+cache implementation directly.
 
 ## State and ownership
 
@@ -67,6 +75,17 @@ reverse proposal passes. A fixed home destination is therefore a map boundary,
 not a legacy-candidate fallback; its crossing local factor remains owned and
 scored exactly by the relevant beam.
 
+Post-stitch pricing reuses ranked exact factor maps for unanchored layers. A
+repeated anchor is replaced as one group and all affected factors are scored
+with the shared scorer. Retained columns are then fully rescored, so the pass
+changes support but not factor ownership or ranking semantics.
+
+Pair pricing considers only groups whose affected factor windows overlap. It
+scores the union of affected factors, keeps at most the working top-K from each
+joint neighborhood, and fully rescores those survivors. This can cross a
+two-variable utility valley without constructing an all-domain Cartesian
+product.
+
 ## Read only what the task needs
 
 | Task | First files | Usually avoid |
@@ -76,6 +95,7 @@ scored exactly by the relevant beam.
 | Proposal-support experiment | `rust/top_k/factor_maps.rs`, `rust/top_k/forward.rs`, `rust/top_k/candidates.rs` | oracle internals |
 | Reverse/symmetric guidance | `rust/top_k/backward.rs` | forward ranking details |
 | Stitch or anchor invariant | `rust/top_k/stitch.rs`, `DESIGN.md` | factor-map construction |
+| Complete-path pricing/routing | `rust/top_k/pricing.rs`, `rust/top_k/factor_maps.rs`, `rust/top_k/stitch.rs` | oracle internals |
 | Exactness/oracle issue | `rust/oracle.rs`, `experiments/benchmarks/exact-reference.md` | bounded passes |
 | Quality or throughput measurement | `experiments/measurement-guide.md`, then the named harness | retired-tag source |
 
@@ -101,6 +121,14 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 | `continuation_proposal_limit` | 1 | all | reverse-projection proposals per guidance state |
 | `seam_refresh_per_prefix` | 1 | all | extra suffix states from retained prefixes; never replaces reverse states |
 | `stitch_bias` | 1 | contexts with 3+ steps | shifts the balanced stitch layer |
+| `pricing_passes` | 2 | contexts with at least `pricing_min_layers` | maximum completed-path pricing rounds; zero disables |
+| `pricing_seed_limit` | 10 | pricing | best complete plans used as pricing seeds |
+| `pricing_column_limit` | 4 | pricing | exact replacement columns retained per variable/group and seed |
+| `pricing_pair_candidate_limit` | 4 | pricing | exact conditional columns crossed per interacting variable below the deep-pair threshold |
+| `pricing_pair_deep_candidate_limit` | 8 | pricing | wider interacting-pair budget at deep-pair depths |
+| `pricing_pair_deep_min_layers` | 9 | pricing | layer depth at which the wider pair budget applies |
+| `pricing_next_pass_min_new` | 3 | pricing | minimum first-round surviving additions required for another round |
+| `pricing_min_layers` | 6 | pricing | route pricing away from short contexts |
 | `exploration_seed` | required | all | deterministic exploration tie/support choices |
 | `top_k` | 10 | all | returned distinct plans; positive |
 
@@ -118,6 +146,10 @@ The returned output has one row per `(context_id, draw_id, layer)`: `origin`,
 Draws are descending by total utility. With `collect_profile=True`, the
 bounded report also exposes proposal counts and per-pass nanosecond timings;
 their key names are declared in `_core.pyi`.
+
+`exact_top_k()` initializes branch-and-bound with the active bounded result by
+default. This changes pruning only, never the proof result; pass
+`use_bounded_incumbent=False` for a cold-oracle comparison.
 
 ## Safe change loop
 

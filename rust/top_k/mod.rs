@@ -27,6 +27,7 @@ mod backward;
 mod candidates;
 mod factor_maps;
 mod forward;
+mod pricing;
 mod refresh;
 mod stitch;
 
@@ -40,6 +41,7 @@ use factor_maps::{
     FactorMapRequest, ReverseFactorMapRequest,
 };
 use forward::forward_beam;
+use pricing::{price_complete_plans, RankedZones};
 use refresh::refresh_stitch_frontier;
 pub use stitch::search_top_k_all;
 
@@ -319,6 +321,13 @@ pub struct TopKReport {
     pub heuristic_reserve_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
+    pub pricing_candidate_evaluations: u64,
+    pub pricing_feasible_evaluations: u64,
+    pub pricing_plans_added: u64,
+    pub pricing_pair_evaluations: u64,
+    pub pricing_pair_feasible_evaluations: u64,
+    pub pricing_pair_plans_added: u64,
+    pub pricing_rounds: u64,
     pub stitch_pairs: u64,
     pub completed_plans: u64,
     pub infeasible_contexts: u64,
@@ -330,6 +339,7 @@ pub struct TopKReport {
     pub surface_proposal_ns: u64,
     pub factor_map_ns: u64,
     pub seam_refresh_ns: u64,
+    pub pricing_ns: u64,
     pub stitch_ns: u64,
     pub materialize_ns: u64,
     pub total_search_ns: u64,
@@ -389,8 +399,61 @@ pub struct TopKOptions {
     pub continuation_proposal_limit: usize,
     pub seam_refresh_per_prefix: usize,
     pub heuristic_reserve_limit: usize,
+    /// Iterative exact single-variable pricing rounds over completed paths.
+    /// Zero leaves the production search unchanged.
+    pub pricing_passes: usize,
+    /// Completed paths retained between pricing rounds.
+    pub pricing_seed_limit: usize,
+    /// Best new paths retained from each priced variable neighborhood.
+    pub pricing_column_limit: usize,
+    /// Best exact conditional replacements crossed for each interacting pair.
+    /// Zero disables the experimental two-variable neighborhood.
+    pub pricing_pair_candidate_limit: usize,
+    /// Wider pair candidate budget at or beyond `pricing_pair_deep_min_layers`.
+    pub pricing_pair_deep_candidate_limit: usize,
+    /// Layer depth at which the wider pair budget applies.
+    pub pricing_pair_deep_min_layers: usize,
+    /// Require this many newly priced paths to survive before another round.
+    /// Zero runs every requested pricing pass.
+    pub pricing_next_pass_min_new: usize,
+    /// Do not price contexts shallower than this many destination layers.
+    pub pricing_min_layers: usize,
     pub profile: bool,
     pub active_trace: Option<ActiveTraceRequest>,
+}
+
+impl TopKOptions {
+    pub(crate) fn active_incumbent(result_limit: u32) -> Self {
+        Self {
+            exploration_seed: 42,
+            result_limit,
+            frontier_width: 40,
+            proposal_limit_per_source: 16,
+            symmetric_message_limit: 4,
+            symmetric_state_limit: 4,
+            symmetric_forward_proposal_limit: 20,
+            candidate_strategy: CandidateStrategy::SymmetricFactorMap,
+            surface_bins: 2,
+            factor_map_max_depth: 5,
+            stitch_bias: 1,
+            continuation_state_limit: 1,
+            deep_continuation_state_limit: 2,
+            continuation_log_gap: 0.0,
+            continuation_proposal_limit: 1,
+            seam_refresh_per_prefix: 1,
+            heuristic_reserve_limit: 0,
+            pricing_passes: 2,
+            pricing_seed_limit: 10,
+            pricing_column_limit: 4,
+            pricing_pair_candidate_limit: 4,
+            pricing_pair_deep_candidate_limit: 8,
+            pricing_pair_deep_min_layers: 9,
+            pricing_next_pass_min_new: 3,
+            pricing_min_layers: 6,
+            profile: false,
+            active_trace: None,
+        }
+    }
 }
 
 struct ActiveTrace {
@@ -660,6 +723,13 @@ impl TopKReport {
         self.heuristic_reserve_proposals += other.heuristic_reserve_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
+        self.pricing_candidate_evaluations += other.pricing_candidate_evaluations;
+        self.pricing_feasible_evaluations += other.pricing_feasible_evaluations;
+        self.pricing_plans_added += other.pricing_plans_added;
+        self.pricing_pair_evaluations += other.pricing_pair_evaluations;
+        self.pricing_pair_feasible_evaluations += other.pricing_pair_feasible_evaluations;
+        self.pricing_pair_plans_added += other.pricing_pair_plans_added;
+        self.pricing_rounds += other.pricing_rounds;
         self.stitch_pairs += other.stitch_pairs;
         self.completed_plans += other.completed_plans;
         self.infeasible_contexts += other.infeasible_contexts;
@@ -671,6 +741,7 @@ impl TopKReport {
         self.surface_proposal_ns += other.surface_proposal_ns;
         self.factor_map_ns += other.factor_map_ns;
         self.seam_refresh_ns += other.seam_refresh_ns;
+        self.pricing_ns += other.pricing_ns;
         self.stitch_ns += other.stitch_ns;
         self.materialize_ns += other.materialize_ns;
         self.total_search_ns += other.total_search_ns;

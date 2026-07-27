@@ -53,12 +53,32 @@ benchmark-throughput: build-release
 benchmark-throughput-fixed-only: build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.perf_bidirectional_grand_geneve --contexts 1000 --threads 8 --profile; exit $LASTEXITCODE
 
-# Interleaved A/B/A timing for a parameterized bounded-search experiment.
+# Counterbalanced timing for an exploratory parameterized bounded-search experiment.
 compare-throughput: build-release
-    mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.compare_bidirectional_throughput --contexts 5000 --calibrated --threads 8 --cycles 2; exit $LASTEXITCODE
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.compare_bidirectional_throughput --contexts 5000 --calibrated --threads 8 --cycles 1; exit $LASTEXITCODE
 
 compare-throughput-full: build-release
     mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.compare_bidirectional_throughput --all-supported --contexts 81844 --threads 8 --cycles 2; exit $LASTEXITCODE
+
+# Decision-grade runs use immutable configs, typed gates, cohort locks, and artifacts.
+compare-throughput-manifest manifest: build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.compare_bidirectional_throughput --experiment-manifest {{manifest}} --require-promotion; exit $LASTEXITCODE
+
+compare-quality-manifest manifest: build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --experiment-manifest {{manifest}} --top-k 10 --oracle-depth 10 --max-states 500000; exit $LASTEXITCODE
+
+experiment-new name kind change='':
+    @if ("{{change}}" -eq "") { mamba run -n mobility-destination-sequence-sampler python -m experiments.experiment new experiments/manifests/{{name}}.toml --id {{name}} --kind {{kind}} } else { mamba run -n mobility-destination-sequence-sampler python -m experiments.experiment new experiments/manifests/{{name}}.toml --id {{name}} --kind {{kind}} --change "{{change}}" }; exit $LASTEXITCODE
+
+experiment-validate manifest:
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.experiment validate {{manifest}}; exit $LASTEXITCODE
+
+# Fast candidate screens: one prepared process, one A/B change, small cohorts.
+explore-quality change per_stratum='2' max_states='500000': build-fast
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --contexts-per-stratum {{per_stratum}} --top-k 10 --oracle-depth 10 --max-states {{max_states}} --compact --candidate-option "{{change}}"; exit $LASTEXITCODE
+
+explore-throughput change contexts='1000': build-release
+    mamba run -n mobility-destination-sequence-sampler python -m experiments.benchmarks.compare_bidirectional_throughput --contexts {{contexts}} --calibrated --threads 8 --cycles 1 --allow-output-change --candidate-option "{{change}}"; exit $LASTEXITCODE
 
 # Returned top-100 concentration; all mass is conditional on returned support.
 diagnose-returned-distribution contexts='1000': build-release
@@ -79,6 +99,11 @@ sweep-symmetric: build-fast
 # Run the fixed difficult/regression contexts with cached exact oracles.
 canary-quality: build-fast
     @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --top-k 10 --oracle-depth 100 --max-states 2000000 --compact --context-id 26 --context-id 45331 --context-id 3647 --context-id 2679 --context-id 61440 --context-id 3506 --context-id 57725 --context-id 61662; exit $LASTEXITCODE
+
+# Populate the exact audit, then evaluate pricing-pass gains and observable routers.
+evaluate-pricing-router: build-release
+    @just audit-deep-by-depth 10 500000; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.evaluate_pricing_router --top-k 10 --max-states 500000 --pair-limit 4 --pair-limit 8; exit $LASTEXITCODE
 
 # Run bounded and exact calls locally, returning only a compact JSON report.
 code-mode-probe context_id='26': build-release
