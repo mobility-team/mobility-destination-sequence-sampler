@@ -16,6 +16,11 @@ The default policy is `adaptive_factor_map`. It uses the symmetric factor-map
 channel when a variable run has at least two adjacent unknowns or an anchor
 repeats. When fixed destinations isolate every variable and no anchor repeats,
 it skips the partial reverse channel and uses ordinary exact factor maps.
+Each layer's immutable destination table, first-choice status, terminal state,
+and adjacent step are compiled once per context and reused by factor-map,
+reverse-prefix, and pricing scans. This changes implementation cost only:
+feasibility, `f64` arithmetic, factor ownership, and final exact rescoring are
+unchanged.
 Factor maps apply when every home-bounded tour is at most
 `factor_map_max_depth=5`; a longer uninterrupted tour uses the bounded
 heuristic proposal pool with two exact continuation states. Fixed home returns

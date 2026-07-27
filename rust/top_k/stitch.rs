@@ -222,13 +222,7 @@ pub(super) fn search_context_once(
         }
     }
     longest_variable_run = longest_variable_run.max(variable_run);
-    let compiled_factor_scores =
-        options.candidate_strategy == CandidateStrategy::CompiledAdaptiveFactorMap;
-    let adaptive = matches!(
-        options.candidate_strategy,
-        CandidateStrategy::AdaptiveFactorMap | CandidateStrategy::CompiledAdaptiveFactorMap
-    );
-    let options = if adaptive {
+    let options = if options.candidate_strategy == CandidateStrategy::AdaptiveFactorMap {
         TopKOptions {
             candidate_strategy: if repeated_anchor_slots.iter().any(|&repeated| repeated)
                 || longest_variable_run > 1
@@ -247,7 +241,7 @@ pub(super) fn search_context_once(
         CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap => {
             home_bounded_depth > options.factor_map_max_depth
         }
-        CandidateStrategy::AdaptiveFactorMap | CandidateStrategy::CompiledAdaptiveFactorMap => {
+        CandidateStrategy::AdaptiveFactorMap => {
             unreachable!("adaptive strategy is resolved locally")
         }
         CandidateStrategy::Heuristic => false,
@@ -260,13 +254,9 @@ pub(super) fn search_context_once(
     } else {
         options
     };
-    let prepared_factor_scorers = compiled_factor_scores.then(|| {
-        (0..context.steps.len())
-            .map(|layer| {
-                PreparedLocalScorer::new(destinations, context, &problem, parameters, layer)
-            })
-            .collect()
-    });
+    let prepared_factor_scorers = (0..context.steps.len())
+        .map(|layer| PreparedLocalScorer::new(destinations, context, &problem, parameters, layer))
+        .collect();
     let inputs = SearchInputs {
         graph,
         destinations,

@@ -19,8 +19,7 @@ use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
 use crate::scoring::{
     adjusted_times, build_scoring_problem, fixed_destination_value, score_local_weight,
-    score_local_weight_edges, score_local_weight_from_times, score_zones, Parameters,
-    PreparedLocalScorer, ScoringInputs, ScoringProblem,
+    score_zones, Parameters, PreparedLocalScorer, ScoringInputs, ScoringProblem,
 };
 
 mod backward;
@@ -52,7 +51,6 @@ pub(crate) enum CandidateStrategy {
     FactorMap,
     SymmetricFactorMap,
     AdaptiveFactorMap,
-    CompiledAdaptiveFactorMap,
 }
 
 impl CandidateStrategy {
@@ -63,9 +61,8 @@ impl CandidateStrategy {
             "factor_map" => Ok(Self::FactorMap),
             "symmetric_factor_map" => Ok(Self::SymmetricFactorMap),
             "adaptive_factor_map" => Ok(Self::AdaptiveFactorMap),
-            "compiled_adaptive_factor_map" => Ok(Self::CompiledAdaptiveFactorMap),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'surface', 'factor_map', 'symmetric_factor_map', 'adaptive_factor_map', 'compiled_adaptive_factor_map', or 'heuristic'"
+                "candidate_strategy must be 'surface', 'factor_map', 'symmetric_factor_map', 'adaptive_factor_map', or 'heuristic'"
                     .to_string(),
             )),
         }
@@ -75,10 +72,7 @@ impl CandidateStrategy {
     pub(crate) fn uses_factor_maps(self) -> bool {
         matches!(
             self,
-            Self::FactorMap
-                | Self::SymmetricFactorMap
-                | Self::AdaptiveFactorMap
-                | Self::CompiledAdaptiveFactorMap
+            Self::FactorMap | Self::SymmetricFactorMap | Self::AdaptiveFactorMap
         )
     }
 }
@@ -657,7 +651,7 @@ struct SearchInputs<'a> {
     problem: ScoringProblem,
     parameters: Parameters,
     options: TopKOptions,
-    prepared_factor_scorers: Option<Vec<PreparedLocalScorer<'a>>>,
+    prepared_factor_scorers: Vec<PreparedLocalScorer<'a>>,
     anchor_slots: HashMap<u32, usize>,
     repeated_anchor_slots: Vec<bool>,
 }

@@ -5,6 +5,26 @@ kernel measurements, not end-to-end Mobility timings.
 
 ## Active bounded top-K
 
+### Compiled exact factor scoring
+
+The active kernel prepares one immutable scorer per context layer. Factor-map,
+reverse-prefix, and pricing scans reuse direct activity-table references plus
+the layer's first-choice, terminal, and adjacent-step state. Final plan scoring
+and all `f64` factor arithmetic remain exact.
+
+On a locked 20,000-context, two-block pure-performance validation, outputs and
+all measured work counters are identical:
+
+| Metric | Prior repeated setup | Compiled scorer | Paired-block delta |
+|---|---:|---:|---:|
+| Wall time, raw median | 12.772 s | 12.193 s | -5.8% |
+| Aggregate Rust, raw median | 74.788 s | 64.195 s | -14.4% |
+| Factor-map CPU, raw median | 55.404 s | 45.808 s | -17.3% |
+| Pricing CPU, raw median | 8.779 s | 8.022 s | -8.9% |
+
+The paired aggregate-Rust blocks span -15.9% to -12.8%, factor-map blocks
+span -18.9% to -15.7%, and wall blocks span -9.0% to -2.7%.
+
 ### Adaptive structural factor-map router
 
 The active `adaptive_factor_map` policy keeps partial symmetric guidance when

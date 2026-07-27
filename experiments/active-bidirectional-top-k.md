@@ -40,6 +40,23 @@ zero-overlap cases across 258 oracle-certified contexts. A linked
 deltas are -5.5%/-4.9%/-5.5%, respectively. The two paired wall blocks span
 -7.5% to +0.1%, while aggregate Rust improves in both blocks.
 
+## Compiled exact factor scoring (2026-07-27)
+
+Factor-map construction previously repeated activity-table hash lookup,
+first-choice and terminal checks, and adjacent-step resolution for every
+destination in every map. The active implementation compiles those immutable
+layer-local inputs once per context. Map construction, reverse-prefix
+guidance, and exact pricing columns reuse the compiled evaluator; arithmetic
+and feasibility remain the shared scorer's exact operations.
+
+A locked 20,000-context, two-block pure-performance validation produced
+identical output fingerprints and every measured work counter. Paired median
+aggregate Rust time improves 14.4%, factor-map CPU 17.3%, pricing CPU 8.9%,
+and wall time 5.8%. Both Rust blocks improve, spanning -15.9% to -12.8%;
+paired wall blocks span -9.0% to -2.7%. A proposal-only logarithm
+approximation was tested separately and removed because it did not accelerate
+the Windows release build.
+
 ## Evidence (Grand Geneve, 2026-07-22)
 
 - Five deterministic 50-context cohorts: mean `Mass@10` 0.892 and

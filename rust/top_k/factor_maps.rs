@@ -49,53 +49,23 @@ pub(super) fn next_factor_map<'a>(
                         })
                 });
                 let mut map = FactorScoreMap::with_capacity(request.domain.len());
-                if let Some(scorer) = inputs
-                    .prepared_factor_scorers
-                    .as_ref()
-                    .map(|scorers| scorers[request.layer + 1])
-                {
-                    for (position, &destination) in request.domain.iter().enumerate() {
-                        let score = inputs
-                            .graph
-                            .factor_edge_to(destination, request.next_zone)
-                            .and_then(|inbound| {
-                                let (_, arrival) = adjusted_times(
-                                    inputs.context.steps[request.layer + 1],
-                                    inbound,
-                                )?;
-                                scorer.score_from_times(
-                                    request.next_zone,
-                                    inbound,
-                                    arrival,
-                                    next_departure,
-                                )
-                            });
-                        if let Some(score) = score {
-                            map.push(position, score);
-                        }
-                    }
-                } else {
-                    for (position, &destination) in request.domain.iter().enumerate() {
-                        let score = inputs
-                            .graph
-                            .factor_edge_to(destination, request.next_zone)
-                            .and_then(|inbound| {
-                                let (_, arrival) = adjusted_times(
-                                    inputs.context.steps[request.layer + 1],
-                                    inbound,
-                                )?;
-                                score_local_weight_from_times(
-                                    inputs.scoring(),
-                                    request.layer + 1,
-                                    request.next_zone,
-                                    inbound,
-                                    arrival,
-                                    next_departure,
-                                )
-                            });
-                        if let Some(score) = score {
-                            map.push(position, score);
-                        }
+                let scorer = inputs.prepared_factor_scorers[request.layer + 1];
+                for (position, &destination) in request.domain.iter().enumerate() {
+                    let score = inputs
+                        .graph
+                        .factor_edge_to(destination, request.next_zone)
+                        .and_then(|inbound| {
+                            let (_, arrival) =
+                                adjusted_times(inputs.context.steps[request.layer + 1], inbound)?;
+                            scorer.score_from_times(
+                                request.next_zone,
+                                inbound,
+                                arrival,
+                                next_departure,
+                            )
+                        });
+                    if let Some(score) = score {
+                        map.push(position, score);
                     }
                 }
                 map
@@ -181,31 +151,18 @@ pub(super) fn reverse_prefix_partial_score(
             };
             Some(next)
         };
-        score += if let Some(scorer) = inputs
-            .prepared_factor_scorers
-            .as_ref()
-            .map(|scorers| scorers[factor_layer])
-        {
-            let edge = inputs.graph.edge_to(factor_origin, factor_destination)?;
-            let next_edge = if terminal_fixed {
-                None
-            } else {
-                Some(
-                    inputs
-                        .graph
-                        .edge_to(factor_destination, next_destination?)?,
-                )
-            };
-            scorer.score_edges(factor_destination, edge, next_edge)?
+        let scorer = inputs.prepared_factor_scorers[factor_layer];
+        let edge = inputs.graph.edge_to(factor_origin, factor_destination)?;
+        let next_edge = if terminal_fixed {
+            None
         } else {
-            score_local_weight(
-                inputs.scoring(),
-                factor_layer,
-                factor_origin,
-                factor_destination,
-                next_destination,
-            )?
+            Some(
+                inputs
+                    .graph
+                    .edge_to(factor_destination, next_destination?)?,
+            )
         };
+        score += scorer.score_edges(factor_destination, edge, next_edge)?;
     }
     if !factor_is_exactly_scored(0) {
         if let Some(first_destination) = known_destination(0) {
@@ -353,65 +310,28 @@ pub(super) fn factor_map_candidates(
                             .map(|(_, arrival)| arrival)
                     });
                     let mut map = FactorScoreMap::with_capacity(domain.len());
-                    if let Some(scorer) = inputs
-                        .prepared_factor_scorers
-                        .as_ref()
-                        .map(|scorers| scorers[request.layer - 1])
-                    {
-                        for (position, &destination) in domain.iter().enumerate() {
-                            let score = inbound.and_then(|inbound| {
-                                let outbound =
-                                    inputs.graph.factor_edge_from(request.origin, destination)?;
-                                let next_departure = if inputs.parameters.update_plan_timings {
-                                    Some(
-                                        adjusted_times(
-                                            inputs.context.steps[request.layer],
-                                            outbound,
-                                        )?
+                    let scorer = inputs.prepared_factor_scorers[request.layer - 1];
+                    for (position, &destination) in domain.iter().enumerate() {
+                        let score = inbound.and_then(|inbound| {
+                            let outbound =
+                                inputs.graph.factor_edge_from(request.origin, destination)?;
+                            let next_departure = if inputs.parameters.update_plan_timings {
+                                Some(
+                                    adjusted_times(inputs.context.steps[request.layer], outbound)?
                                         .0,
-                                    )
-                                } else {
-                                    None
-                                };
-                                scorer.score_from_times(
-                                    request.origin,
-                                    inbound,
-                                    arrival?,
-                                    next_departure,
                                 )
-                            });
-                            if let Some(score) = score {
-                                map.push(position, score);
-                            }
-                        }
-                    } else {
-                        for (position, &destination) in domain.iter().enumerate() {
-                            let score = inbound.and_then(|inbound| {
-                                let outbound =
-                                    inputs.graph.factor_edge_from(request.origin, destination)?;
-                                let next_departure = if inputs.parameters.update_plan_timings {
-                                    Some(
-                                        adjusted_times(
-                                            inputs.context.steps[request.layer],
-                                            outbound,
-                                        )?
-                                        .0,
-                                    )
-                                } else {
-                                    None
-                                };
-                                score_local_weight_from_times(
-                                    inputs.scoring(),
-                                    request.layer - 1,
-                                    request.origin,
-                                    inbound,
-                                    arrival?,
-                                    next_departure,
-                                )
-                            });
-                            if let Some(score) = score {
-                                map.push(position, score);
-                            }
+                            } else {
+                                None
+                            };
+                            scorer.score_from_times(
+                                request.origin,
+                                inbound,
+                                arrival?,
+                                next_departure,
+                            )
+                        });
+                        if let Some(score) = score {
+                            map.push(position, score);
                         }
                     }
                     map
@@ -450,49 +370,21 @@ pub(super) fn factor_map_candidates(
                 maps.current_destination_scans += domain.len() as u64;
                 let map = {
                     let mut map = FactorScoreMap::with_capacity(domain.len());
-                    if let Some(scorer) = inputs
-                        .prepared_factor_scorers
-                        .as_ref()
-                        .map(|scorers| scorers[request.layer])
-                    {
-                        for (position, &destination) in domain.iter().enumerate() {
-                            let score = inputs
-                                .graph
-                                .factor_edge_from(request.origin, destination)
-                                .and_then(|inbound| {
-                                    inputs
-                                        .graph
-                                        .factor_edge_to(destination, next_zone)
-                                        .and_then(|outbound| {
-                                            scorer.score_edges(destination, inbound, Some(outbound))
-                                        })
-                                });
-                            if let Some(score) = score {
-                                map.push(position, score);
-                            }
-                        }
-                    } else {
-                        for (position, &destination) in domain.iter().enumerate() {
-                            let score = inputs
-                                .graph
-                                .factor_edge_from(request.origin, destination)
-                                .and_then(|inbound| {
-                                    inputs
-                                        .graph
-                                        .factor_edge_to(destination, next_zone)
-                                        .and_then(|outbound| {
-                                            score_local_weight_edges(
-                                                inputs.scoring(),
-                                                request.layer,
-                                                destination,
-                                                inbound,
-                                                Some(outbound),
-                                            )
-                                        })
-                                });
-                            if let Some(score) = score {
-                                map.push(position, score);
-                            }
+                    let scorer = inputs.prepared_factor_scorers[request.layer];
+                    for (position, &destination) in domain.iter().enumerate() {
+                        let score = inputs
+                            .graph
+                            .factor_edge_from(request.origin, destination)
+                            .and_then(|inbound| {
+                                inputs
+                                    .graph
+                                    .factor_edge_to(destination, next_zone)
+                                    .and_then(|outbound| {
+                                        scorer.score_edges(destination, inbound, Some(outbound))
+                                    })
+                            });
+                        if let Some(score) = score {
+                            map.push(position, score);
                         }
                     }
                     map

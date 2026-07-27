@@ -36,6 +36,8 @@ api.rs -> search_top_k_all() -> search_context()
 - `top_k/pricing.rs`: locally routed exact replacements from stitched complete
   paths, including bounded interacting-pair neighborhoods, followed by full
   shared-scorer reranking.
+- Layer-local factor scorers compile immutable activity-table and step state
+  once per context; map construction, reverse guidance, and pricing reuse them.
 - The active factor-map router keeps partial symmetric guidance for adjacent
   variables and repeated anchors, and uses ordinary factor maps when fixed
   destinations isolate every variable.
