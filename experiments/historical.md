@@ -27,9 +27,13 @@
 | Exact width-zero decomposition | Rejected | Collapsing anchors, exactly scanning independent unary variables, and lazily combining their top-K choices preserved exact quality, but a full release A/B regressed wall 28.749→30.703 s and aggregate measured phase time about 193.4→201.2 s. The 5,296 routed successful contexts added 5.3M domain evaluations. |
 | Width-routed exact best-first search | Rejected | Recomputing 324 cached width-one contexts cost 9.71 ms/context and 147.5M child evaluations; 157 width-two contexts cost 229.74 ms/context and 1.15B children. Raw-zone domain size defeats the favorable treewidth. |
 | Returned/internal candidate-lattice closure | Rejected | Exact recombination over returned per-variable zones could raise cached mean Mass@10 only 0.776→0.782. Internal proposed/retained support bounds were 0.800/0.787 overall and only 0.079/0.002 in zero-mass cases. |
+| Admissible OD blocks and box search | Rejected | Bounds were admissible but not selective enough, and coarse aggregation changed path ranking. No hierarchy runtime path is retained. |
+| Backtracking tickets | Rejected | A one-ticket canary repaired a few near-cutoff prefixes but improved the full oracle cohort by only about one percentage point in best-path recall. |
+| Agenda-motif root proposals | Rejected | A warm bounded-result cache had high conditional value but retrieved only 3 of 28 active root misses; its whole-cohort mass potential was too small to justify a cache subsystem. |
 
 Archived code and retired benchmark harnesses are in the
 `research-archive-2026-07-21` Git tag; use
 `git show research-archive-2026-07-21:<path>` to inspect a file.
 The retained oracle is `rust/oracle.rs`. Details and compact lessons
-are in [`lessons-learned.md`](lessons-learned.md).
+are in [`lessons-learned.md`](lessons-learned.md) and
+[`retired-experiment-notes.md`](retired-experiment-notes.md).
