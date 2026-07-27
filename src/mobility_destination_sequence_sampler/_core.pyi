@@ -9,6 +9,7 @@ CandidateStrategy = Literal[
     "factor_map",
     "symmetric_factor_map",
     "adaptive_factor_map",
+    "compiled_adaptive_factor_map",
 ]
 
 

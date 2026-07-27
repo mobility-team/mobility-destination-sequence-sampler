@@ -63,6 +63,7 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
             "factor_map",
             "symmetric_factor_map",
             "adaptive_factor_map",
+            "compiled_adaptive_factor_map",
             "heuristic",
         ),
         default=ACTIVE_TOP_K_DEFAULTS["candidate_strategy"],

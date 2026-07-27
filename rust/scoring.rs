@@ -127,6 +127,91 @@ fn activity_log_weight(
     attraction + parameters.logit_scale * (activity_utility - edge.cost)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PreparedLocalScorer<'a> {
+    step: Step,
+    next_step: Option<Step>,
+    activity_values: Option<&'a [Option<DestinationValue>]>,
+    first_choice: bool,
+    terminal_fixed_destination: bool,
+    parameters: Parameters,
+}
+
+impl<'a> PreparedLocalScorer<'a> {
+    pub(crate) fn new(
+        destinations: &'a DestinationIndex,
+        context: &Context,
+        problem: &ScoringProblem,
+        parameters: Parameters,
+        layer: usize,
+    ) -> Self {
+        let step = context.steps[layer];
+        Self {
+            step,
+            next_step: context.steps.get(layer + 1).copied(),
+            activity_values: destinations.activity(step.activity_id),
+            first_choice: problem.first_choice_by_layer[layer],
+            terminal_fixed_destination: layer + 1 == context.steps.len()
+                && step.fixed_destination.is_some(),
+            parameters,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn score_from_times(
+        self,
+        destination: usize,
+        edge: Edge,
+        arrival: f64,
+        next_departure: Option<f64>,
+    ) -> Option<f64> {
+        let duration = if self.terminal_fixed_destination {
+            MIN_ACTIVITY_DURATION_HOURS
+        } else if self.parameters.update_plan_timings {
+            let duration = next_departure? - arrival;
+            if duration <= 0.0 {
+                return None;
+            }
+            duration
+        } else {
+            self.step.duration_per_person
+        };
+        let destination_value = fixed_destination_value(self.activity_values, destination);
+        let attraction = if self.step.fixed_destination.is_some() || !self.first_choice {
+            0.0
+        } else if destination_value.log_opportunity_capacity.is_finite() {
+            destination_value.log_opportunity_capacity
+        } else {
+            return None;
+        };
+        Some(activity_log_weight(
+            self.step,
+            edge,
+            destination_value,
+            duration,
+            attraction,
+            self.parameters,
+        ))
+    }
+
+    #[inline]
+    pub(crate) fn score_edges(
+        self,
+        destination: usize,
+        edge: Edge,
+        next_edge: Option<Edge>,
+    ) -> Option<f64> {
+        let (_, arrival) = adjusted_times(self.step, edge)?;
+        let next_departure =
+            if self.terminal_fixed_destination || !self.parameters.update_plan_timings {
+                None
+            } else {
+                Some(adjusted_times(self.next_step?, next_edge?)?.0)
+            };
+        self.score_from_times(destination, edge, arrival, next_departure)
+    }
+}
+
 pub(crate) fn score_local_weight(
     inputs: ScoringInputs<'_>,
     layer: usize,

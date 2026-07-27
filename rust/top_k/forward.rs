@@ -108,6 +108,7 @@ pub(super) fn forward_beam(
                             CandidateStrategy::FactorMap
                                 | CandidateStrategy::SymmetricFactorMap
                                 | CandidateStrategy::AdaptiveFactorMap
+                                | CandidateStrategy::CompiledAdaptiveFactorMap
                         ) =>
                 {
                     used_factor_map = true;
