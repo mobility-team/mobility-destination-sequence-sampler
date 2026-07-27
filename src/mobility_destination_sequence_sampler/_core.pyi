@@ -4,7 +4,11 @@ from typing import Any, Literal, TypedDict
 
 
 CandidateStrategy = Literal[
-    "heuristic", "surface", "factor_map", "symmetric_factor_map"
+    "heuristic",
+    "surface",
+    "factor_map",
+    "symmetric_factor_map",
+    "adaptive_factor_map",
 ]
 
 
@@ -20,6 +24,23 @@ class ActiveTraceTargetReport(TypedDict):
     exact_guidance_log_gap: list[float | None]
     prefix_pruned: list[bool | None]
     pruned: list[bool]
+
+
+class PricingPairProbeReport(TypedDict):
+    pass_index: int
+    seed_rank: int
+    left_group: int
+    right_group: int
+    evaluated: int
+    feasible: int
+    expansion_evaluated: int
+    boundary_score_gap: float | None
+    neighborhood_saturated: bool
+    entering_working_top_k: int
+    kth_score_improvement: float
+    max_non_additivity: float
+    expansion_entering_working_top_k: int
+    expansion_kth_score_improvement: float
 
 
 class TopKReport(TypedDict):
@@ -54,6 +75,9 @@ class TopKReport(TypedDict):
     pricing_pair_evaluations: int
     pricing_pair_feasible_evaluations: int
     pricing_pair_plans_added: int
+    pricing_pair_probes: int
+    pricing_pair_expansions: int
+    pricing_pair_probe_reports: list[PricingPairProbeReport]
     pricing_rounds: int
     stitch_pairs: int
     complete_plan_candidates: int
@@ -110,7 +134,7 @@ class DestinationPlanSearch:
         symmetric_message_limit: int = 4,
         symmetric_state_limit: int = 4,
         symmetric_forward_proposal_limit: int = 20,
-        candidate_strategy: CandidateStrategy = "symmetric_factor_map",
+        candidate_strategy: CandidateStrategy = "adaptive_factor_map",
         surface_bins: int = 2,
         factor_map_max_depth: int = 5,
         stitch_bias: int = 1,
@@ -125,7 +149,7 @@ class DestinationPlanSearch:
         pricing_column_limit: int = 4,
         pricing_pair_candidate_limit: int = 4,
         pricing_pair_deep_candidate_limit: int = 8,
-        pricing_pair_deep_min_layers: int = 9,
+        pricing_pair_deep_min_layers: int = 0,
         pricing_next_pass_min_new: int = 3,
         pricing_min_layers: int = 6,
         top_k: int = 10,

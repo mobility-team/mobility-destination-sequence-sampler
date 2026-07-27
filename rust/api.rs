@@ -41,7 +41,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="symmetric_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=9, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -116,10 +116,10 @@ impl DestinationPlanSearch {
             && (pricing_seed_limit == 0
                 || pricing_column_limit == 0
                 || pricing_min_layers < 2
-                || (pricing_pair_deep_candidate_limit > 0 && pricing_pair_deep_min_layers < 2))
+                || (pricing_pair_deep_candidate_limit > 0 && pricing_pair_deep_min_layers == 1))
         {
             return Err(SamplerError::InvalidInput(
-                "pricing seed/column limits must be positive and pricing layer thresholds must be at least 2 when their channels are enabled".to_string(),
+                "pricing seed/column limits must be positive; pricing_min_layers must be at least 2, and pricing_pair_deep_min_layers must be 0 for local expansion or at least 2".to_string(),
             )
             .into());
         }
@@ -410,6 +410,37 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
         report.pricing_pair_feasible_evaluations,
     )?;
     result.set_item("pricing_pair_plans_added", report.pricing_pair_plans_added)?;
+    result.set_item("pricing_pair_probes", report.pricing_pair_probes)?;
+    result.set_item("pricing_pair_expansions", report.pricing_pair_expansions)?;
+    let pricing_pair_probes = report
+        .pricing_pair_probe_reports
+        .iter()
+        .map(|probe| {
+            let item = PyDict::new(py);
+            item.set_item("pass_index", probe.pass_index)?;
+            item.set_item("seed_rank", probe.seed_rank)?;
+            item.set_item("left_group", probe.left_group)?;
+            item.set_item("right_group", probe.right_group)?;
+            item.set_item("evaluated", probe.evaluated)?;
+            item.set_item("feasible", probe.feasible)?;
+            item.set_item("expansion_evaluated", probe.expansion_evaluated)?;
+            item.set_item("boundary_score_gap", probe.boundary_score_gap)?;
+            item.set_item("neighborhood_saturated", probe.neighborhood_saturated)?;
+            item.set_item("entering_working_top_k", probe.entering_working_top_k)?;
+            item.set_item("kth_score_improvement", probe.kth_score_improvement)?;
+            item.set_item("max_non_additivity", probe.max_non_additivity)?;
+            item.set_item(
+                "expansion_entering_working_top_k",
+                probe.expansion_entering_working_top_k,
+            )?;
+            item.set_item(
+                "expansion_kth_score_improvement",
+                probe.expansion_kth_score_improvement,
+            )?;
+            Ok(item.into_any().unbind())
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    result.set_item("pricing_pair_probe_reports", pricing_pair_probes)?;
     result.set_item("pricing_rounds", report.pricing_rounds)?;
     result.set_item("stitch_pairs", report.stitch_pairs)?;
     result.set_item("complete_plan_candidates", report.completed_plans)?;

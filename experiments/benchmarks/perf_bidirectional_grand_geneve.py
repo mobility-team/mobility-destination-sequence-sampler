@@ -196,6 +196,11 @@ def main() -> None:
         runs.append((time.perf_counter() - started, bidirectional, bidirectional_report))
     runs.sort(key=lambda run: run[0])
     bidirectional_seconds, bidirectional, bidirectional_report = runs[len(runs) // 2]
+    pair_route = (
+        "local"
+        if args.pricing_pair_deep_min_layers == 0
+        else f"depth-{args.pricing_pair_deep_min_layers}+"
+    )
 
     print("\nbounded top-K")
     print(
@@ -218,7 +223,7 @@ def main() -> None:
         f"pricing={args.pricing_passes}x{args.pricing_column_limit} "
         f"pricing-pair-limit={args.pricing_pair_candidate_limit} "
         f"pricing-deep-pair={args.pricing_pair_deep_candidate_limit}"
-        f"@{args.pricing_pair_deep_min_layers}+ "
+        f"({pair_route}) "
         f"next-pass-min-new={args.pricing_next_pass_min_new} "
         f"pricing-min-layers={args.pricing_min_layers} "
         f"threads={args.threads}"
@@ -236,6 +241,8 @@ def main() -> None:
         f"pricing-rounds={bidirectional_report['pricing_rounds']} "
         f"pricing-evaluations={bidirectional_report['pricing_candidate_evaluations']} "
         f"pricing-pair-evaluations={bidirectional_report['pricing_pair_evaluations']} "
+        f"pricing-pair-probes={bidirectional_report['pricing_pair_probes']} "
+        f"pricing-pair-expansions={bidirectional_report['pricing_pair_expansions']} "
         f"pricing-added={bidirectional_report['pricing_plans_added']} "
         f"stitch-pairs={bidirectional_report['stitch_pairs']} "
         f"infeasible={bidirectional_report['infeasible_contexts']}"

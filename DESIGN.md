@@ -33,9 +33,12 @@ api.rs -> search_top_k_all() -> search_context()
 - `top_k/mod.rs`: shared search state and per-context orchestration.
 - `top_k/candidates.rs`: heuristic and binned-surface proposals/cache;
   `top_k/mod.rs` also owns factor-map proposal composition.
-- `top_k/pricing.rs`: depth-routed exact replacements from stitched complete
+- `top_k/pricing.rs`: locally routed exact replacements from stitched complete
   paths, including bounded interacting-pair neighborhoods, followed by full
   shared-scorer reranking.
+- The active factor-map router keeps partial symmetric guidance for adjacent
+  variables and repeated anchors, and uses ordinary factor maps when fixed
+  destinations isolate every variable.
 - New passes take `SearchInputs` + `SearchScratch`, not long argument lists.
 - `oracle.rs`: exact top-K oracle; it proves or fails at
   `max_states`, never approximates.

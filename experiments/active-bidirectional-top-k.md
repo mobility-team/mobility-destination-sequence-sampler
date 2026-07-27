@@ -1,6 +1,6 @@
-# Active: symmetric unbinned factor-map top-K
+# Active: adaptive unbinned factor-map top-K
 
-`top_k()` defaults to `candidate_strategy="symmetric_factor_map"`,
+`top_k()` defaults to `candidate_strategy="adaptive_factor_map"`,
 `symmetric_message_limit=4`, `symmetric_state_limit=4`,
 `symmetric_forward_proposal_limit=20`, and `stitch_bias=1`.
 Depth 2 is a direct scan. Factor maps apply while every home-bounded tour is at
@@ -16,6 +16,29 @@ proposals are handed forward as compact destination assignments. Forward search
 preserves its primary beam, unions twenty partial candidates, and may retain
 four extra partial-ranked states. Partial scores guide search only; completed
 plans use the exact shared scorer.
+
+## Local symmetric-guidance router (2026-07-27)
+
+The active strategy selects between the same two measured factor-map channels
+using only local problem structure. It keeps symmetric partial messages when
+an anchor repeats or at least two unresolved destinations are adjacent.
+Otherwise every variable is bracketed by fixed destinations, and the router
+uses ordinary exact factor maps without the partial reverse pass. This is
+feature-based algorithm selection, not a scoring approximation: both branches
+retain the same factor-ownership and exact final-ranking rules.
+
+The rule routes 16,144 contexts, 28.4% of the non-two-step workload, to the
+cheaper branch. It was selected after a 40-context discovery comparison:
+symmetric guidance beat ordinary factor maps on 12 cases; nine had repeated
+anchors, while all three remaining gains had a consecutive-variable run.
+
+On a fresh locked ten-per-stratum validation cohort, both policies have
+post-stratified `Mass@10=0.893736`, `Recall@10=0.885990`, and 24 certified
+zero-overlap cases across 258 oracle-certified contexts. A linked
+20,000-context, two-block release validation improves paired wall time by
+3.7%, aggregate Rust time by 3.9%, and factor-map CPU by 4.8%. Raw median
+deltas are -5.5%/-4.9%/-5.5%, respectively. The two paired wall blocks span
+-7.5% to +0.1%, while aggregate Rust improves in both blocks.
 
 ## Evidence (Grand Geneve, 2026-07-22)
 
@@ -154,3 +177,47 @@ Pricing CPU rises from 19.413 to 25.553 seconds. A 20,000-context calibrated
 comparison measured +5.6% wall. The routed policy is promoted: its large,
 one-sided deep-quality gain clears the output-changing quality gate at a small
 full-workload wall-time increment.
+
+## Adaptive local pair router (2026-07-27)
+
+The active pair router now probes the best four exact conditional columns per
+interacting variable and expands that pair to eight only when the best 4x4
+candidate improves the current working Kth score by more than 0.2. The
+second-pass requirement remains at least three newly surviving plans.
+`pricing_pair_deep_min_layers=0` selects this local rule; positive values
+retain the former depth-routed policy as an experiment comparator.
+
+The simple short-context baseline was tried first. Lowering
+`pricing_min_layers` from 6 to 3 improved a locked validation cohort from
+conditional `Mass@10` 0.864 to 0.878 and post-stratified mass 0.884823 to
+0.898616 without changing zero overlap. It was rejected because the
+20,000-context paired runtime gate regressed wall time by 7.8%, aggregate Rust
+by 10.4%, and pricing CPU by 113.6%.
+
+The 4x4 probe study measured truncation gap, neighborhood saturation,
+working-top-K entry, Kth-score improvement, pair non-additivity, and
+feasible/evaluated ratio. Working-K entry was the strongest threshold-free
+signal, but its full-workload pair count was 11.27M versus 7.97M for the
+depth router. A 0.1 Kth-improvement margin preserved the exact repairs but
+missed its locked 3% wall gate by a fraction. The frozen 0.2 margin cleared
+fresh validation.
+
+On the final untouched stratified cohort, the oracle certified 258 of 396
+sampled contexts. Relative to the depth router, conditional `Mass@10`
+improves 0.861 to 0.864, conditional recall 0.856 to 0.859, post-stratified
+mass 0.891126 to 0.892315, and post-stratified recall 0.885857 to 0.887460;
+zero-overlap cases are unchanged. The missing-certificate mass bounds are
+0.749050/0.891126/0.921760 (lower/imputed/upper) for the depth router and
+0.749825/0.892315/0.922536 for local. Among 105 certified deep
+bounded-complete contexts, no-pair/uniform-4/depth-routed/local/uniform-8 mass is
+0.775/0.817/0.818/0.825/0.826. Local improves 18 contexts with no losses and
+uses 1,370 pair evaluations/context versus 1,641 depth-routed and 3,539
+uniform-8.
+
+The linked 20,000-context validation has paired wall/Rust/factor-map/pricing
+deltas of -2.5%/-2.7%/-2.9%/+1.0%. On all 81,844 contexts, the two paired
+blocks give median deltas of -0.7% wall, -0.4% aggregate Rust, -0.7%
+factor-map CPU, and +3.0% pricing CPU. Local evaluates 9.57M pairs versus
+7.97M for the depth router, so the promotion clears the alternative success
+criterion: a repeatable exact-quality improvement within the current
+end-to-end runtime budget, rather than pair-count parity.

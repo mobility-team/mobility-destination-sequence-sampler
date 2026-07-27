@@ -51,6 +51,7 @@ pub(crate) enum CandidateStrategy {
     Surface,
     FactorMap,
     SymmetricFactorMap,
+    AdaptiveFactorMap,
 }
 
 impl CandidateStrategy {
@@ -60,8 +61,9 @@ impl CandidateStrategy {
             "surface" => Ok(Self::Surface),
             "factor_map" => Ok(Self::FactorMap),
             "symmetric_factor_map" => Ok(Self::SymmetricFactorMap),
+            "adaptive_factor_map" => Ok(Self::AdaptiveFactorMap),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'surface', 'factor_map', 'symmetric_factor_map', or 'heuristic'"
+                "candidate_strategy must be 'surface', 'factor_map', 'symmetric_factor_map', 'adaptive_factor_map', or 'heuristic'"
                     .to_string(),
             )),
         }
@@ -69,7 +71,10 @@ impl CandidateStrategy {
 
     #[inline]
     pub(crate) fn uses_factor_maps(self) -> bool {
-        matches!(self, Self::FactorMap | Self::SymmetricFactorMap)
+        matches!(
+            self,
+            Self::FactorMap | Self::SymmetricFactorMap | Self::AdaptiveFactorMap
+        )
     }
 }
 
@@ -327,6 +332,9 @@ pub struct TopKReport {
     pub pricing_pair_evaluations: u64,
     pub pricing_pair_feasible_evaluations: u64,
     pub pricing_pair_plans_added: u64,
+    pub pricing_pair_probes: u64,
+    pub pricing_pair_expansions: u64,
+    pub pricing_pair_probe_reports: Vec<PricingPairProbeReport>,
     pub pricing_rounds: u64,
     pub stitch_pairs: u64,
     pub completed_plans: u64,
@@ -344,6 +352,24 @@ pub struct TopKReport {
     pub materialize_ns: u64,
     pub total_search_ns: u64,
     pub active_trace_targets: Vec<ActiveTraceTargetReport>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PricingPairProbeReport {
+    pub pass_index: usize,
+    pub seed_rank: usize,
+    pub left_group: usize,
+    pub right_group: usize,
+    pub evaluated: usize,
+    pub feasible: usize,
+    pub expansion_evaluated: usize,
+    pub boundary_score_gap: Option<f64>,
+    pub neighborhood_saturated: bool,
+    pub entering_working_top_k: usize,
+    pub kth_score_improvement: f64,
+    pub max_non_additivity: f64,
+    pub expansion_entering_working_top_k: usize,
+    pub expansion_kth_score_improvement: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -409,9 +435,9 @@ pub struct TopKOptions {
     /// Best exact conditional replacements crossed for each interacting pair.
     /// Zero disables the experimental two-variable neighborhood.
     pub pricing_pair_candidate_limit: usize,
-    /// Wider pair candidate budget at or beyond `pricing_pair_deep_min_layers`.
+    /// Wider pair candidate budget for local or depth-routed expansion.
     pub pricing_pair_deep_candidate_limit: usize,
-    /// Layer depth at which the wider pair budget applies.
+    /// Zero enables local probe-and-expand; positive values retain a depth comparator.
     pub pricing_pair_deep_min_layers: usize,
     /// Require this many newly priced paths to survive before another round.
     /// Zero runs every requested pricing pass.
@@ -432,7 +458,7 @@ impl TopKOptions {
             symmetric_message_limit: 4,
             symmetric_state_limit: 4,
             symmetric_forward_proposal_limit: 20,
-            candidate_strategy: CandidateStrategy::SymmetricFactorMap,
+            candidate_strategy: CandidateStrategy::AdaptiveFactorMap,
             surface_bins: 2,
             factor_map_max_depth: 5,
             stitch_bias: 1,
@@ -447,7 +473,7 @@ impl TopKOptions {
             pricing_column_limit: 4,
             pricing_pair_candidate_limit: 4,
             pricing_pair_deep_candidate_limit: 8,
-            pricing_pair_deep_min_layers: 9,
+            pricing_pair_deep_min_layers: 0,
             pricing_next_pass_min_new: 3,
             pricing_min_layers: 6,
             profile: false,
@@ -729,6 +755,10 @@ impl TopKReport {
         self.pricing_pair_evaluations += other.pricing_pair_evaluations;
         self.pricing_pair_feasible_evaluations += other.pricing_pair_feasible_evaluations;
         self.pricing_pair_plans_added += other.pricing_pair_plans_added;
+        self.pricing_pair_probes += other.pricing_pair_probes;
+        self.pricing_pair_expansions += other.pricing_pair_expansions;
+        self.pricing_pair_probe_reports
+            .extend(other.pricing_pair_probe_reports.iter().cloned());
         self.pricing_rounds += other.pricing_rounds;
         self.stitch_pairs += other.stitch_pairs;
         self.completed_plans += other.completed_plans;

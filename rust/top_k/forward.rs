@@ -105,7 +105,9 @@ pub(super) fn forward_beam(
                     if unassigned
                         && matches!(
                             strategy,
-                            CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap
+                            CandidateStrategy::FactorMap
+                                | CandidateStrategy::SymmetricFactorMap
+                                | CandidateStrategy::AdaptiveFactorMap
                         ) =>
                 {
                     used_factor_map = true;

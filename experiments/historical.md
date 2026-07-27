@@ -30,6 +30,11 @@
 | Admissible OD blocks and box search | Rejected | Bounds were admissible but not selective enough, and coarse aggregation changed path ranking. No hierarchy runtime path is retained. |
 | Backtracking tickets | Rejected | A one-ticket canary repaired a few near-cutoff prefixes but improved the full oracle cohort by only about one percentage point in best-path recall. |
 | Agenda-motif root proposals | Rejected | A warm bounded-result cache had high conditional value but retrieved only 3 of 28 active root misses; its whole-cohort mass potential was too small to justify a cache subsystem. |
+| Pricing from depth 3 | Rejected | Improved locked conditional `Mass@10` 0.864->0.878 and post-stratified mass 0.884823->0.898616, but the 20,000-context paired gate regressed wall 7.8%, aggregate Rust 10.4%, and pricing CPU 113.6%. |
+| Pair truncation/saturation/non-additivity routers | Rejected | Boundary-gap, saturation, feasible-ratio, and non-additivity rules routed too much work or captured less 8x8 pressure than the Kth-score signal; for example gap<=0.25 cost about 3,094 pair evaluations/context versus 1,690 for the depth router. |
+| Zero-margin local pair expansion | Rejected | Working-top-K entry matched nearly all uniform-8 quality, but full-workload pair evaluations rose from 7.97M to 11.27M. |
+| Kth-improvement margin 0.1 | Rejected | Preserved the exact repairs and reduced exact-cohort pair work, but missed its immutable 3% wall-regression gate by a fraction on the untouched 20,000-context runtime cohort. |
+| Endpoint-aware home-subtour search | Rejected | Independent candidates were merged with the fixed-home boundary factor scored exactly and cross-home anchors routed away. Limit 8 raised certified conditional `Mass@10` only 0.87213->0.87349 and post-stratified mass 0.88742->0.88820 while bounded time rose 5.44->6.26 ms/context; zero overlap was unchanged, and limits 16/32 added no pilot quality. |
 
 Archived code and retired benchmark harnesses are in the
 `research-archive-2026-07-21` Git tag; use

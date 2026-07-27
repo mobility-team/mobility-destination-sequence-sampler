@@ -12,8 +12,11 @@ best plan, but every plan it returns is ranked with the shared exact scorer.
 or raises when its state budget is exhausted. It is never a production
 fallback.
 
-The default policy is `symmetric_factor_map`. It uses exact, unbinned local
-factor maps when every home-bounded tour is at most
+The default policy is `adaptive_factor_map`. It uses the symmetric factor-map
+channel when a variable run has at least two adjacent unknowns or an anchor
+repeats. When fixed destinations isolate every variable and no anchor repeats,
+it skips the partial reverse channel and uses ordinary exact factor maps.
+Factor maps apply when every home-bounded tour is at most
 `factor_map_max_depth=5`; a longer uninterrupted tour uses the bounded
 heuristic proposal pool with two exact continuation states. Fixed home returns
 remain part of the full scorer and do not make tours independently solvable. A
@@ -21,8 +24,9 @@ two-step context is a direct exact scan. After stitching, contexts with at
 least six layers price exact single-variable replacements from the best
 complete plans. At most two rounds run; the second requires at least three new
 surviving plans from the first. Each round also crosses exact conditional
-columns for interacting variable pairs: four candidates per variable normally,
-and eight from depth 9 onward.
+columns for interacting variable pairs. Every pair probes four candidates per
+variable, then expands to eight only when the best probe candidate improves
+the current working Kth score by more than 0.2.
 
 ## One-context flow
 
@@ -36,7 +40,7 @@ Python tables
   -> forward beam and proposal support
   -> optional forward-to-backward seam refresh
   -> exact boundary stitch and deduplicate
-  -> depth-routed exact path pricing
+  -> locally routed exact path pricing
   -> materialize
 ```
 
@@ -84,7 +88,8 @@ Pair pricing considers only groups whose affected factor windows overlap. It
 scores the union of affected factors, keeps at most the working top-K from each
 joint neighborhood, and fully rescores those survivors. This can cross a
 two-variable utility valley without constructing an all-domain Cartesian
-product.
+product. The 4x4 probe uses runtime scores only; exact certificates are
+offline experiment labels and never router inputs.
 
 ## Read only what the task needs
 
@@ -109,7 +114,7 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 |---|---:|---|---|
 | `frontier_width` | 40 | all | retained states on the main beams |
 | `proposal_limit_per_source` | 16 | all | proposal support per retained source |
-| `candidate_strategy` | `symmetric_factor_map` | all | `heuristic`, `surface`, `factor_map`, or active symmetric policy |
+| `candidate_strategy` | `adaptive_factor_map` | all | `heuristic`, `surface`, `factor_map`, `symmetric_factor_map`, or active structural router |
 | `factor_map_max_depth` | 5 | factor-map policies | longest home-bounded tour allowed before falling back to heuristic support |
 | `symmetric_message_limit` | 4 | symmetric only | partial reverse messages; zero disables that channel |
 | `symmetric_state_limit` | 4 | symmetric only | retained partial reverse states away from the seam |
@@ -124,15 +129,15 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 | `pricing_passes` | 2 | contexts with at least `pricing_min_layers` | maximum completed-path pricing rounds; zero disables |
 | `pricing_seed_limit` | 10 | pricing | best complete plans used as pricing seeds |
 | `pricing_column_limit` | 4 | pricing | exact replacement columns retained per variable/group and seed |
-| `pricing_pair_candidate_limit` | 4 | pricing | exact conditional columns crossed per interacting variable below the deep-pair threshold |
-| `pricing_pair_deep_candidate_limit` | 8 | pricing | wider interacting-pair budget at deep-pair depths |
-| `pricing_pair_deep_min_layers` | 9 | pricing | layer depth at which the wider pair budget applies |
+| `pricing_pair_candidate_limit` | 4 | pricing | exact conditional columns crossed by the local pair probe |
+| `pricing_pair_deep_candidate_limit` | 8 | pricing | wider interacting-pair budget used after local escalation |
+| `pricing_pair_deep_min_layers` | 0 | pricing | zero enables local probe-and-expand; values >=2 retain the depth-routed comparator |
 | `pricing_next_pass_min_new` | 3 | pricing | minimum first-round surviving additions required for another round |
 | `pricing_min_layers` | 6 | pricing | route pricing away from short contexts |
 | `exploration_seed` | required | all | deterministic exploration tie/support choices |
 | `top_k` | 10 | all | returned distinct plans; positive |
 
-`surface`, `factor_map`, and `heuristic` are retained comparators. Do not
+`surface`, `factor_map`, `symmetric_factor_map`, and `heuristic` are retained comparators. Do not
 change active defaults based on a single context; use the quality harness and
 record the decision in the active experiment note.
 
@@ -145,7 +150,9 @@ The returned output has one row per `(context_id, draw_id, layer)`: `origin`,
 `destination`, `local_log_weight`, and the plan-level `total_log_weight`.
 Draws are descending by total utility. With `collect_profile=True`, the
 bounded report also exposes proposal counts and per-pass nanosecond timings;
-their key names are declared in `_core.pyi`.
+pair probe/expansion counts are included. Supplying an active trace also emits
+per-pair probe signals for offline router analysis; their key names are
+declared in `_core.pyi`.
 
 `exact_top_k()` initializes branch-and-bound with the active bounded result by
 default. This changes pruning only, never the proof result; pass

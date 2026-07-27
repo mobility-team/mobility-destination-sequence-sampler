@@ -213,6 +213,9 @@ COUNTERS = (
     "local_score_cache_hits",
     "local_score_cache_builds",
     "complete_plan_candidates",
+    "pricing_pair_evaluations",
+    "pricing_pair_probes",
+    "pricing_pair_expansions",
 )
 
 
@@ -397,6 +400,14 @@ def main() -> None:
         print(
             f"{label} | {values['wall_seconds']:.3f}s | {values['rust_seconds']:.3f}s | "
             f"{values['factor_map_seconds']:.3f}s | {values['pricing_seconds']:.3f}s"
+        )
+    print("pair work | evaluations | probes | expansions")
+    for label in ("A", "B"):
+        counters = next(run["counters"] for run in runs if run["label"] == label)
+        print(
+            f"{label} | {counters['pricing_pair_evaluations']} | "
+            f"{counters['pricing_pair_probes']} | "
+            f"{counters['pricing_pair_expansions']}"
         )
     counter_reference = runs[0]["counters"]
     counter_drift = [

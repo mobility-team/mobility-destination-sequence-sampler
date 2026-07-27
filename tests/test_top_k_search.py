@@ -191,6 +191,22 @@ def test_bidirectional_top_k_stitches_complete_plan() -> None:
     assert report["complete_plan_candidates"] >= 2
     assert report["continuation_proposals"] > 0
     assert report["seam_refresh_states"] >= 0
+    symmetric_result, symmetric_report = search.top_k(
+        steps=steps,
+        initial_locations=pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
+        logit_scale=1.0,
+        update_plan_timings=True,
+        use_shadow_prices=False,
+        exploration_seed=13,
+        frontier_width=8,
+        proposal_limit_per_source=2,
+        candidate_strategy="symmetric_factor_map",
+        top_k=9,
+    )
+    assert result.equals(symmetric_result)
+    assert report["reverse_prefix_partial_calls"] == symmetric_report[
+        "reverse_prefix_partial_calls"
+    ]
     total_scores = (
         result.filter(pl.col("layer") == 0)
         .sort("draw_id")["total_log_weight"]
@@ -221,6 +237,44 @@ def test_bidirectional_top_k_stitches_complete_plan() -> None:
         top_k=9,
     )
     assert terminal_result.filter(pl.col("layer") == 3)["destination"].unique().to_list() == [1]
+
+    isolated_steps = steps.with_columns(
+        activity_id=pl.Series([10, 0, 20, 0]),
+        anchor_id=pl.lit(None, dtype=pl.UInt32),
+        fixed_destination=pl.Series([None, 0, None, 0], dtype=pl.UInt32),
+    )
+    routed_result, routed_report = search.top_k(
+        steps=isolated_steps,
+        initial_locations=pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
+        logit_scale=1.0,
+        update_plan_timings=True,
+        use_shadow_prices=False,
+        exploration_seed=13,
+        frontier_width=8,
+        proposal_limit_per_source=2,
+        candidate_strategy="adaptive_factor_map",
+        top_k=9,
+    )
+    factor_result, factor_report = search.top_k(
+        steps=isolated_steps,
+        initial_locations=pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
+        logit_scale=1.0,
+        update_plan_timings=True,
+        use_shadow_prices=False,
+        exploration_seed=13,
+        frontier_width=8,
+        proposal_limit_per_source=2,
+        candidate_strategy="factor_map",
+        top_k=9,
+    )
+    assert routed_result.equals(factor_result)
+    for counter in (
+        "forward_proposals_evaluated",
+        "backward_proposals_evaluated",
+        "factor_map_destinations_evaluated",
+        "reverse_prefix_partial_calls",
+    ):
+        assert routed_report[counter] == factor_report[counter]
 
     missing_activity_search = DestinationPlanSearch(
         od_costs=od_costs,
@@ -444,6 +498,18 @@ def test_interacting_pair_pricing_crosses_a_single_replacement_valley() -> None:
         **pricing_options,
         pricing_pair_candidate_limit=1,
     )
+    adaptive_options = {
+        **pricing_options,
+        "pricing_pair_candidate_limit": 1,
+        "pricing_pair_deep_candidate_limit": 2,
+        "pricing_pair_deep_min_layers": 0,
+    }
+    adaptive, adaptive_report = search.top_k(
+        **common,
+        **adaptive_options,
+        active_trace_context_id=1,
+        active_trace_target_plans=[],
+    )
     exact, _ = search.exact_top_k(
         **common,
         max_states=100,
@@ -454,8 +520,14 @@ def test_interacting_pair_pricing_crosses_a_single_replacement_valley() -> None:
         return tuple(frame.sort("layer")["destination"].to_list())
 
     assert plan(scalar) == (1, 1, 0)
-    assert plan(paired) == plan(exact) == (2, 2, 0)
+    assert plan(paired) == plan(adaptive) == plan(exact) == (2, 2, 0)
     assert report["pricing_pair_plans_added"] > 0
+    assert adaptive_report["pricing_pair_probes"] > 0
+    assert adaptive_report["pricing_pair_expansions"] > 0
+    probe = adaptive_report["pricing_pair_probe_reports"][0]
+    assert probe["evaluated"] > 0
+    assert 0 < probe["feasible"] <= probe["evaluated"]
+    assert probe["kth_score_improvement"] >= 0.0
 
 
 def test_home_bounded_factor_maps_keep_a_cross_home_anchor() -> None:

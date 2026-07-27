@@ -5,7 +5,61 @@ kernel measurements, not end-to-end Mobility timings.
 
 ## Active bounded top-K
 
-### Routed interacting-pair pricing
+### Adaptive structural factor-map router
+
+The active `adaptive_factor_map` policy keeps partial symmetric guidance when
+a variable run contains at least two adjacent unknowns or an anchor repeats.
+When fixed destinations isolate every variable and no anchor repeats, it uses
+ordinary exact factor maps and skips the second reverse pass. The rule routes
+16,144 contexts, or 28.4% of the workload not handled by the exact two-step
+path, to the cheaper channel.
+
+On a locked ten-per-stratum validation cohort, the oracle certified 258 of 396
+sampled contexts. The structural router and the prior always-symmetric policy
+were identical at post-stratified `Mass@10=0.893736`, post-stratified
+`Recall@10=0.885990`, and 24 certified zero-overlap cases.
+
+The linked 20,000-context, two-block release validation reports:
+
+| Metric | Always symmetric | Adaptive | Paired-block delta |
+|---|---:|---:|---:|
+| Wall time, raw median | 11.105 s | 10.491 s | -3.7% |
+| Aggregate Rust, raw median | 66.217 s | 62.978 s | -3.9% |
+| Factor-map CPU, raw median | 49.263 s | 46.550 s | -4.8% |
+
+Raw median ratios are -5.5% wall, -4.9% aggregate Rust, and -5.5% factor-map
+CPU. The paired wall blocks span -7.5% to +0.1%; both aggregate-Rust blocks
+improve (-4.9% and -3.0%). The promotion is based on the predeclared >=3%
+paired wall improvement target plus the independent, exactly unchanged
+quality validation.
+
+### Adaptive local interacting-pair pricing
+
+The active router probes 4x4 exact interacting-pair neighborhoods and expands
+to 8x8 only when the best probe candidate improves the current working Kth
+score by more than 0.2. The former depth-routed 4/8 policy is the comparator.
+
+On a fresh ten-per-stratum audit, the oracle certified 258 of 396 contexts.
+Conditional `Mass@10` improves 0.861 to 0.864, post-stratified mass improves
+0.891126 to 0.892315, and zero overlap is unchanged. On the 105
+bounded-complete certified deep cases:
+
+| Policy | Mass@10 | Pair evaluations/context | Wins vs no-pair | Zero |
+|---|---:|---:|---:|---:|
+| Uniform 4 | 0.817 | 982 | 15 | 11 |
+| Prior routed 4/8 | 0.818 | 1,641 | 16 | 11 |
+| Active local 4->8 | 0.825 | 1,370 | 18 | 11 |
+| Uniform 8 | 0.826 | 3,539 | 19 | 11 |
+
+The linked 20,000-context validation reports paired wall/Rust/factor-map/
+pricing deltas of -2.5%/-2.7%/-2.9%/+1.0%. The final two-cycle full-workload
+comparison (81,844 contexts, eight threads) reports paired medians of -0.7%
+wall, -0.4% aggregate Rust, -0.7% factor-map CPU, and +3.0% pricing CPU.
+Local pair evaluations are 9.57M versus 7.97M for the depth router; the
+promotion is therefore based on the measured quality gain at the current
+end-to-end runtime budget, not lower aggregate pair work.
+
+### Prior routed interacting-pair pricing
 
 Full prepared workload (81,844 contexts, 328,197 steps, 1,110 zones), eight
 threads. The two-cycle interleaved comparison is against the otherwise

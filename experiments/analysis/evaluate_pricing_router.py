@@ -11,12 +11,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import polars as pl
 
 from mobility_destination_sequence_sampler import DestinationPlanSearch
 
 from experiments.analysis.compare_bidirectional_top_k_grand_geneve import (
+    context_profiles,
     ranked_plans,
     retained_probability_mass,
 )
@@ -52,6 +54,12 @@ class Case:
     pair_masses: dict[int, float]
     pair_ms: dict[int, float]
     pair_evaluations: dict[int, int]
+    pair_probe_reports: list[dict[str, object]]
+    local_mass: float
+    local_ms: float
+    local_pair_evaluations: int
+    local_pair_probes: int
+    local_pair_expansions: int
 
     @property
     def first_gain(self) -> float:
@@ -71,10 +79,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--max-states", type=int, default=500_000)
-    parser.add_argument("--frontier-width", type=int, default=32)
+    parser.add_argument("--frontier-width", type=int, default=40)
     parser.add_argument("--pricing-min-layers", type=int, default=6)
     parser.add_argument("--pricing-seed-limit", type=int, default=10)
     parser.add_argument("--pricing-column-limit", type=int, default=4)
+    parser.add_argument(
+        "--contexts-per-stratum",
+        type=int,
+        help="restrict evaluation to a deterministic depth/anchor-stratified cohort",
+    )
+    parser.add_argument("--selection-seed", type=int, default=42)
     parser.add_argument(
         "--oracle-cache-fingerprint",
         help="reuse completed exact certificates from this explicit fingerprint; never reuses cached failures",
@@ -101,7 +115,10 @@ def run_search(
     pricing_passes: int,
     *,
     pair_limit: int = 0,
+    pair_deep_limit: int = 0,
+    pair_deep_min_layers: int = 9,
     pricing_next_pass_min_new: int = 0,
+    collect_pair_probes: bool = False,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     options = {
         **ACTIVE_TOP_K_DEFAULTS,
@@ -110,10 +127,19 @@ def run_search(
         "pricing_seed_limit": args.pricing_seed_limit,
         "pricing_column_limit": args.pricing_column_limit,
         "pricing_pair_candidate_limit": pair_limit,
-        "pricing_pair_deep_candidate_limit": 0,
+        "pricing_pair_deep_candidate_limit": pair_deep_limit,
+        "pricing_pair_deep_min_layers": pair_deep_min_layers,
         "pricing_next_pass_min_new": pricing_next_pass_min_new,
         "pricing_min_layers": args.pricing_min_layers,
     }
+    trace_options = (
+        {
+            "active_trace_context_id": int(context_steps["context_id"][0]),
+            "active_trace_target_plans": [],
+        }
+        if collect_pair_probes
+        else {}
+    )
     return search.top_k(
         steps=context_steps,
         initial_locations=context_initial,
@@ -126,6 +152,7 @@ def run_search(
         n_threads=1,
         skip_infeasible=True,
         collect_profile=True,
+        **trace_options,
     )
 
 
@@ -282,6 +309,62 @@ def print_pair_study(cases: list[Case], pair_limits: list[int]) -> None:
             f"{sum(hybrid_ms) / len(cases):7.2f} | "
             f"{sum(hybrid_evaluations) // len(cases):17d}"
         )
+        local_masses = [case.local_mass for case in cases]
+        local_gains = [
+            mass - case.active_mass
+            for case, mass in zip(cases, local_masses, strict=True)
+        ]
+        print(
+            f"{'local 4->8':>10s} | {len(cases):2d} | "
+            f"{sum(local_masses) / len(cases):.3f} | "
+            f"{sum(local_gains) / len(cases):+.3f} | "
+            f"{sum(gain > 1e-12 for gain in local_gains):2d}/"
+            f"{sum(gain < -1e-12 for gain in local_gains):2d} | "
+            f"{sum(mass <= 0.0 for mass in local_masses):4d} | "
+            f"{sum(case.local_ms for case in cases) / len(cases):7.2f} | "
+            f"{sum(case.local_pair_evaluations for case in cases) // len(cases):17d}"
+        )
+        print(
+            "local expansion rate "
+            f"{sum(case.local_pair_expansions for case in cases) / max(sum(case.local_pair_probes for case in cases), 1):.1%}"
+        )
+        print("\nLargest uniform-8 gains over local")
+        for case in sorted(
+            cases,
+            key=lambda item: (
+                -(item.pair_masses[8] - item.local_mass),
+                item.context_id,
+            ),
+        )[:12]:
+            gain = case.pair_masses[8] - case.local_mass
+            if gain <= 1e-12:
+                break
+            print(
+                f"context={case.context_id:5d} layers={case.layers:2d} "
+                f"mass={case.local_mass:.3f}->{case.pair_masses[8]:.3f} "
+                f"gain={gain:+.3f} pair-eval={case.local_pair_evaluations}"
+                f"->{case.pair_evaluations[8]}"
+            )
+            for row in case.pair_probe_reports:
+                if (
+                    int(row["entering_working_top_k"]) == 0
+                    and int(row["expansion_entering_working_top_k"]) > 0
+                ):
+                    feasible_ratio = int(row["feasible"]) / max(
+                        int(row["evaluated"]), 1
+                    )
+                    print(
+                        "  missed-pressure "
+                        f"pass={row['pass_index']} seed={row['seed_rank']} "
+                        f"pair={row['left_group']}/{row['right_group']} "
+                        f"gap={row['boundary_score_gap']} saturated="
+                        f"{row['neighborhood_saturated']} "
+                        f"nonadd={float(row['max_non_additivity']):.3f} "
+                        f"feasible={feasible_ratio:.2f} "
+                        f"expansion-entering="
+                        f"{row['expansion_entering_working_top_k']} "
+                        f"expansion-eval={row['expansion_evaluated']}"
+                    )
     best_limit = max(
         pair_limits,
         key=lambda limit: sum(case.pair_masses[limit] for case in cases),
@@ -299,6 +382,155 @@ def print_pair_study(cases: list[Case], pair_limits: list[int]) -> None:
             f"context={case.context_id:5d} layers={case.layers:2d} "
             f"mass={case.active_mass:.3f}->{case.pair_masses[best_limit]:.3f} "
             f"gain={gain:+.3f}"
+        )
+
+
+def print_pair_probe_study(cases: list[Case]) -> None:
+    cases = [
+        case
+        for case in cases
+        if case.pair_probe_reports and 4 in case.pair_evaluations and 8 in case.pair_masses
+    ]
+    if not cases:
+        return
+    rules: list[tuple[str, Callable[[dict[str, object]], bool]]] = [
+        ("all probes", lambda row: True),
+        ("neighborhood saturated", lambda row: bool(row["neighborhood_saturated"])),
+        (
+            "boundary gap<=0.05",
+            lambda row: row["boundary_score_gap"] is not None
+            and float(row["boundary_score_gap"]) <= 0.05,
+        ),
+        (
+            "boundary gap<=0.10",
+            lambda row: row["boundary_score_gap"] is not None
+            and float(row["boundary_score_gap"]) <= 0.10,
+        ),
+        (
+            "boundary gap<=0.25",
+            lambda row: row["boundary_score_gap"] is not None
+            and float(row["boundary_score_gap"]) <= 0.25,
+        ),
+        (
+            "probe enters working K",
+            lambda row: int(row["entering_working_top_k"]) > 0,
+        ),
+        (
+            "Kth improvement>0.1",
+            lambda row: float(row["kth_score_improvement"]) > 0.1,
+        ),
+        (
+            "Kth improvement>0.2",
+            lambda row: float(row["kth_score_improvement"]) > 0.2,
+        ),
+        (
+            "pair non-additivity>0",
+            lambda row: float(row["max_non_additivity"]) > 1e-12,
+        ),
+        (
+            "pair non-additivity>0.1",
+            lambda row: float(row["max_non_additivity"]) > 0.1,
+        ),
+        (
+            "pair non-additivity>1.0",
+            lambda row: float(row["max_non_additivity"]) > 1.0,
+        ),
+        (
+            "feasible/evaluated>=0.75",
+            lambda row: int(row["evaluated"]) > 0
+            and int(row["feasible"]) / int(row["evaluated"]) >= 0.75,
+        ),
+        (
+            "saturated & gap<=0.25",
+            lambda row: bool(row["neighborhood_saturated"])
+            and row["boundary_score_gap"] is not None
+            and float(row["boundary_score_gap"]) <= 0.25,
+        ),
+        (
+            "saturated & probe enters",
+            lambda row: bool(row["neighborhood_saturated"])
+            and int(row["entering_working_top_k"]) > 0,
+        ),
+        (
+            "enters or sat & nonadd>1",
+            lambda row: int(row["entering_working_top_k"]) > 0
+            or (
+                bool(row["neighborhood_saturated"])
+                and float(row["max_non_additivity"]) > 1.0
+            ),
+        ),
+        (
+            "enters or sat & nonadd>1.5",
+            lambda row: int(row["entering_working_top_k"]) > 0
+            or (
+                bool(row["neighborhood_saturated"])
+                and float(row["max_non_additivity"]) > 1.5
+            ),
+        ),
+        (
+            "enters or gap<=.15 & nonadd>.25",
+            lambda row: int(row["entering_working_top_k"]) > 0
+            or (
+                bool(row["neighborhood_saturated"])
+                and row["boundary_score_gap"] is not None
+                and float(row["boundary_score_gap"]) <= 0.15
+                and float(row["max_non_additivity"]) > 0.25
+            ),
+        ),
+        (
+            "enters or gap<=.5 & nonadd>1.5",
+            lambda row: int(row["entering_working_top_k"]) > 0
+            or (
+                bool(row["neighborhood_saturated"])
+                and row["boundary_score_gap"] is not None
+                and float(row["boundary_score_gap"]) <= 0.5
+                and float(row["max_non_additivity"]) > 1.5
+            ),
+        ),
+    ]
+    total_rows = sum(len(case.pair_probe_reports) for case in cases)
+    total_pressure = sum(
+        int(row["expansion_entering_working_top_k"])
+        for case in cases
+        for row in case.pair_probe_reports
+    )
+    positive_exact_gain = sum(
+        max(case.pair_masses[8] - case.pair_masses[4], 0.0) for case in cases
+    )
+    print("\n4x4 probe-and-expand signals (uniform-8 discovery labels)")
+    print(
+        "rule                         | probes | expansion pressure | "
+        "positive exact-gain contexts | pair eval/context"
+    )
+    for label, predicate in rules:
+        selected_rows = [
+            row
+            for case in cases
+            for row in case.pair_probe_reports
+            if predicate(row)
+        ]
+        captured_pressure = sum(
+            int(row["expansion_entering_working_top_k"]) for row in selected_rows
+        )
+        touched_gain = sum(
+            max(case.pair_masses[8] - case.pair_masses[4], 0.0)
+            for case in cases
+            if any(predicate(row) for row in case.pair_probe_reports)
+        )
+        pair_evaluations = sum(
+            case.pair_evaluations[4]
+            + sum(
+                int(row["expansion_evaluated"])
+                for row in case.pair_probe_reports
+                if predicate(row)
+            )
+            for case in cases
+        ) / len(cases)
+        print(
+            f"{label:28s} | {len(selected_rows) / total_rows:6.1%} | "
+            f"{captured_pressure / total_pressure if total_pressure else 1.0:6.1%} | "
+            f"{touched_gain / positive_exact_gain if positive_exact_gain else 1.0:6.1%} | "
+            f"{pair_evaluations:17.0f}"
         )
 
 
@@ -322,7 +554,23 @@ def main() -> None:
         use_shadow_prices=True,
     )
     cache = OracleCache(fingerprint, args.top_k, args.max_states)
-    context_ids = cache.cached_context_ids()
+    if args.contexts_per_stratum is None:
+        context_ids = cache.cached_context_ids()
+    else:
+        context_ids = [
+            int(context_id)
+            for context_id in (
+                context_profiles(steps)
+                .filter(pl.col("layers") >= 2)
+                .with_columns(
+                    sample_order=pl.col("context_id").hash(seed=args.selection_seed)
+                )
+                .sort(["audit_stratum", "sample_order"])
+                .group_by("audit_stratum", maintain_order=True)
+                .head(args.contexts_per_stratum)["context_id"]
+                .to_list()
+            )
+        ]
     search = DestinationPlanSearch(
         od_costs=od_costs,
         destination_inputs=destination_inputs,
@@ -357,6 +605,12 @@ def main() -> None:
         pair_masses = {}
         pair_ms = {}
         pair_evaluations = {}
+        pair_probe_reports = []
+        local_mass = 0.0
+        local_ms = 0.0
+        local_pair_evaluations = 0
+        local_pair_probes = 0
+        local_pair_expansions = 0
         if args.pair_limit:
             active, active_report = run_search(
                 search,
@@ -381,6 +635,7 @@ def main() -> None:
                     pricing_next_pass_min_new=ACTIVE_TOP_K_DEFAULTS[
                         "pricing_next_pass_min_new"
                     ],
+                    collect_pair_probes=pair_limit == 8,
                 )
                 pair_masses[pair_limit] = retained_probability_mass(
                     oracle, path_set(paired)
@@ -389,6 +644,31 @@ def main() -> None:
                 pair_evaluations[pair_limit] = int(
                     paired_report["pricing_pair_evaluations"]
                 )
+                if pair_limit == 8:
+                    pair_probe_reports = list(
+                        paired_report["pricing_pair_probe_reports"]
+                    )
+            if 4 in args.pair_limit and 8 in args.pair_limit:
+                local, local_report = run_search(
+                    search,
+                    context_steps,
+                    context_initial,
+                    args,
+                    2,
+                    pair_limit=4,
+                    pair_deep_limit=8,
+                    pair_deep_min_layers=0,
+                    pricing_next_pass_min_new=ACTIVE_TOP_K_DEFAULTS[
+                        "pricing_next_pass_min_new"
+                    ],
+                )
+                local_mass = retained_probability_mass(oracle, path_set(local))
+                local_ms = float(local_report["total_search_ns"]) / 1e6
+                local_pair_evaluations = int(
+                    local_report["pricing_pair_evaluations"]
+                )
+                local_pair_probes = int(local_report["pricing_pair_probes"])
+                local_pair_expansions = int(local_report["pricing_pair_expansions"])
         baseline_paths = path_set(baseline)
         one_paths = path_set(one_pass)
         cases.append(
@@ -413,13 +693,21 @@ def main() -> None:
                 pair_masses=pair_masses,
                 pair_ms=pair_ms,
                 pair_evaluations=pair_evaluations,
+                pair_probe_reports=pair_probe_reports,
+                local_mass=local_mass,
+                local_ms=local_ms,
+                local_pair_evaluations=local_pair_evaluations,
+                local_pair_probes=local_pair_probes,
+                local_pair_expansions=local_pair_expansions,
             )
         )
     if not cases:
         raise RuntimeError(f"no cached deep certificates under {cache.path}")
     print_router_study(cases)
     if args.pair_limit:
-        print_pair_study(cases, list(dict.fromkeys(args.pair_limit)))
+        pair_limits = list(dict.fromkeys(args.pair_limit))
+        print_pair_study(cases, pair_limits)
+        print_pair_probe_study(cases)
 
 
 if __name__ == "__main__":

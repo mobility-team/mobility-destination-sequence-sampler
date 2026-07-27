@@ -195,10 +195,54 @@ pub(super) fn search_context_once(
         }
     }
     home_bounded_depth = home_bounded_depth.max(context.steps.len() - tour_start);
+    let anchor_slots = anchor_slots(context);
+    let mut anchor_counts = vec![0_u32; anchor_slots.len()];
+    for step in &context.steps {
+        if let Some(anchor) = step.anchor_id {
+            anchor_counts[anchor_slots[&anchor]] += 1;
+        }
+    }
+    let repeated_anchor_slots = anchor_counts
+        .into_iter()
+        .map(|count| count > 1)
+        .collect::<Vec<_>>();
+    // Partial symmetric messages are most valuable when an unresolved choice
+    // has a non-local equality constraint or another unresolved choice beside
+    // it. Fixed destinations make single-variable runs locally observable by
+    // the ordinary exact factor maps, so the adaptive comparator skips the
+    // second reverse pass for those contexts.
+    let mut longest_variable_run = 0;
+    let mut variable_run = 0;
+    for step in &context.steps {
+        if step.fixed_destination.is_some() {
+            longest_variable_run = longest_variable_run.max(variable_run);
+            variable_run = 0;
+        } else {
+            variable_run += 1;
+        }
+    }
+    longest_variable_run = longest_variable_run.max(variable_run);
+    let options = if options.candidate_strategy == CandidateStrategy::AdaptiveFactorMap {
+        TopKOptions {
+            candidate_strategy: if repeated_anchor_slots.iter().any(|&repeated| repeated)
+                || longest_variable_run > 1
+            {
+                CandidateStrategy::SymmetricFactorMap
+            } else {
+                CandidateStrategy::FactorMap
+            },
+            ..options
+        }
+    } else {
+        options
+    };
     let use_heuristic = match options.candidate_strategy {
         CandidateStrategy::Surface => context.steps.len() > 4,
         CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap => {
             home_bounded_depth > options.factor_map_max_depth
+        }
+        CandidateStrategy::AdaptiveFactorMap => {
+            unreachable!("adaptive strategy is resolved locally")
         }
         CandidateStrategy::Heuristic => false,
     };
@@ -210,14 +254,6 @@ pub(super) fn search_context_once(
     } else {
         options
     };
-    let anchor_slots = anchor_slots(context);
-    let mut anchor_counts = vec![0_u32; anchor_slots.len()];
-    for step in &context.steps {
-        if let Some(anchor) = step.anchor_id {
-            anchor_counts[anchor_slots[&anchor]] += 1;
-        }
-    }
-    let repeated_anchor_slots = anchor_counts.into_iter().map(|count| count > 1).collect();
     let inputs = SearchInputs {
         graph,
         destinations,
