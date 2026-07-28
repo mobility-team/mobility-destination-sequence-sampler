@@ -39,6 +39,7 @@
 | Zero-margin local pair expansion | Rejected | Working-top-K entry matched nearly all uniform-8 quality, but full-workload pair evaluations rose from 7.97M to 11.27M. |
 | Kth-improvement margin 0.1 | Rejected | Preserved the exact repairs and reduced exact-cohort pair work, but missed its immutable 3% wall-regression gate by a fraction on the untouched 20,000-context runtime cohort. |
 | Endpoint-aware home-subtour search | Rejected | Independent candidates were merged with the fixed-home boundary factor scored exactly and cross-home anchors routed away. Limit 8 raised certified conditional `Mass@10` only 0.87213->0.87349 and post-stratified mass 0.88742->0.88820 while bounded time rose 5.44->6.26 ms/context; zero overlap was unchanged, and limits 16/32 added no pilot quality. |
+| Budgeted exact-heap refinement | Rejected as a runtime path | On five false-infeasible cases, 32k generated states found feasible plans in all five and exact top-10 in four. On six hard quality cases, mean `Mass@10` rose from 0.146 to about 0.646. The release kernel nevertheless took 30--101 ms for only 2k states and 0.49--1.00 s for 32k on representative cases, far outside the 10 ms median / 30 ms p95 gate. Revisit only with a much cheaper bound/expansion kernel, not by routing production traffic through the oracle. |
 
 Archived code and retired benchmark harnesses are in the
 `research-archive-2026-07-21` Git tag; use
