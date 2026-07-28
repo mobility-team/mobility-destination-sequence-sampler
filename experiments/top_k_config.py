@@ -18,10 +18,8 @@ ACTIVE_TOP_K_DEFAULTS = {
     "stitch_bias": 1,
     "continuation_state_limit": 1,
     "deep_continuation_state_limit": 2,
-    "continuation_log_gap": 0.0,
     "continuation_proposal_limit": 1,
     "seam_refresh_per_prefix": 1,
-    "heuristic_reserve_limit": 0,
     "pricing_passes": 2,
     "pricing_seed_limit": 10,
     "pricing_column_limit": 4,
@@ -92,11 +90,6 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         default=ACTIVE_TOP_K_DEFAULTS["deep_continuation_state_limit"],
     )
     parser.add_argument(
-        "--continuation-log-gap",
-        type=float,
-        default=ACTIVE_TOP_K_DEFAULTS["continuation_log_gap"],
-    )
-    parser.add_argument(
         "--continuation-proposal-limit",
         type=int,
         default=ACTIVE_TOP_K_DEFAULTS["continuation_proposal_limit"],
@@ -105,12 +98,6 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         "--seam-refresh-per-prefix",
         type=int,
         default=ACTIVE_TOP_K_DEFAULTS["seam_refresh_per_prefix"],
-    )
-    parser.add_argument(
-        "--heuristic-reserve-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["heuristic_reserve_limit"],
-        help="add this many heuristic candidates when factor-map and heuristic support share fewer than this many zones",
     )
     parser.add_argument(
         "--pricing-passes",

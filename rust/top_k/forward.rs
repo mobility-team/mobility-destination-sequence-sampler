@@ -20,7 +20,6 @@ pub(super) fn forward_beam(
     };
     let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
     let factor_map_guidance_limit = continuation_state_limit.max(4);
-    let heuristic_reserve_limit = inputs.options.heuristic_reserve_limit;
     let symmetric = inputs.options.candidate_strategy == CandidateStrategy::SymmetricFactorMap;
     let symmetric_message_limit = inputs.options.symmetric_message_limit;
     let symmetric_state_limit = inputs.options.symmetric_state_limit;
@@ -82,7 +81,6 @@ pub(super) fn forward_beam(
             } else {
                 Some(nodes[parent.parent.expect("non-root forward parent")].zone)
             };
-            let mut used_factor_map = false;
             let mut candidate_zones = match (inputs.options.candidate_strategy, guidance_suffix) {
                 (CandidateStrategy::Surface, Some(suffix_index)) if unassigned => {
                     let surface_started = profile.then(Instant::now);
@@ -110,7 +108,6 @@ pub(super) fn forward_beam(
                                 | CandidateStrategy::AdaptiveFactorMap
                         ) =>
                 {
-                    used_factor_map = true;
                     let map_started = profile.then(Instant::now);
                     let factor_suffixes = if backward.frontiers[layer + 1].is_empty() {
                         guidance_suffixes
@@ -202,23 +199,6 @@ pub(super) fn forward_beam(
                     if let Some(started) = map_started {
                         report.factor_map_ns += started.elapsed().as_nanos() as u64;
                     }
-                }
-            }
-            if used_factor_map && heuristic_reserve_limit > 0 {
-                let heuristic_zones = candidates(candidate_inputs, query, candidate_cache)?;
-                let agreement = candidate_zones
-                    .iter()
-                    .filter(|zone| heuristic_zones.contains(zone))
-                    .count();
-                if agreement < heuristic_reserve_limit {
-                    let reserve = heuristic_zones
-                        .into_iter()
-                        .filter(|zone| !candidate_zones.contains(zone))
-                        .take(heuristic_reserve_limit)
-                        .collect::<Vec<_>>();
-                    report.heuristic_reserve_triggers += 1;
-                    report.heuristic_reserve_proposals += reserve.len() as u64;
-                    candidate_zones.extend(reserve);
                 }
             }
             let proposal_guidance_started = profile.then(Instant::now);

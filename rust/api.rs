@@ -41,7 +41,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_log_gap=0.0, continuation_proposal_limit=1, seam_refresh_per_prefix=1, heuristic_reserve_limit=0, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_proposal_limit=1, seam_refresh_per_prefix=1, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -63,10 +63,8 @@ impl DestinationPlanSearch {
         stitch_bias: i32,
         continuation_state_limit: usize,
         deep_continuation_state_limit: usize,
-        continuation_log_gap: f64,
         continuation_proposal_limit: usize,
         seam_refresh_per_prefix: usize,
-        heuristic_reserve_limit: usize,
         pricing_passes: usize,
         pricing_seed_limit: usize,
         pricing_column_limit: usize,
@@ -99,12 +97,6 @@ impl DestinationPlanSearch {
             return Err(
                 SamplerError::InvalidInput("surface_bins must be 2 or 4".to_string()).into(),
             );
-        }
-        if !continuation_log_gap.is_finite() || continuation_log_gap < 0.0 {
-            return Err(SamplerError::InvalidInput(
-                "continuation_log_gap must be finite and non-negative".to_string(),
-            )
-            .into());
         }
         if factor_map_max_depth < 2 {
             return Err(SamplerError::InvalidInput(
@@ -163,10 +155,8 @@ impl DestinationPlanSearch {
                     stitch_bias,
                     continuation_state_limit,
                     deep_continuation_state_limit,
-                    continuation_log_gap,
                     continuation_proposal_limit,
                     seam_refresh_per_prefix,
-                    heuristic_reserve_limit,
                     pricing_passes,
                     pricing_seed_limit,
                     pricing_column_limit,
@@ -385,14 +375,6 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("local_score_cache_hits", report.local_score_cache_hits)?;
     result.set_item("local_score_cache_builds", report.local_score_cache_builds)?;
     result.set_item("continuation_proposals", report.continuation_proposals)?;
-    result.set_item(
-        "heuristic_reserve_triggers",
-        report.heuristic_reserve_triggers,
-    )?;
-    result.set_item(
-        "heuristic_reserve_proposals",
-        report.heuristic_reserve_proposals,
-    )?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
     result.set_item(

@@ -679,11 +679,7 @@ def trace_oracle_candidate_coverage(
 def trace_active_stage_coverage(report: dict[str, object]) -> None:
     """Show bounded-search proposal and retention for oracle targets."""
     traces = report.get("active_trace_targets", [])
-    print(
-        "active factor-map trace (proposed / retained / pruned; "
-        f"heuristic-reserve triggers={report['heuristic_reserve_triggers']}, "
-        f"proposals={report['heuristic_reserve_proposals']}):"
-    )
+    print("active factor-map trace (proposed / retained / pruned):")
     for rank, trace in enumerate(traces, start=1):
         zones = trace["zones"]
         proposed = trace["proposed"]

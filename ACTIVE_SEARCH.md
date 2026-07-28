@@ -114,6 +114,9 @@ offline experiment labels and never router inputs.
 The public method deliberately exposes tuning knobs for experiments. Defaults
 are the active production boundary, not a promise that every combination is
 meaningful. Pass only the knobs relevant to the selected strategy.
+Rejected zero-default policies are removed rather than kept as dormant
+branches; their decisions live in `experiments/historical.md` and their source
+in the research archive tag.
 
 | Setting | Default | Applies to | Effect / constraint |
 |---|---:|---|---|
@@ -127,7 +130,6 @@ meaningful. Pass only the knobs relevant to the selected strategy.
 | `surface_bins` | 2 | `surface` only | binned comparator resolution (2 or 4) |
 | `continuation_state_limit` | 1 | all | exact reverse guidance states consulted forward |
 | `deep_continuation_state_limit` | 2 | contexts deeper than `factor_map_max_depth` | wider exact reverse guidance for heuristic-support depths |
-| `continuation_log_gap` | 0.0 | all | additionally retain exact guidance states within this log-utility band; zero preserves fixed-width behavior |
 | `continuation_proposal_limit` | 1 | all | reverse-projection proposals per guidance state |
 | `seam_refresh_per_prefix` | 1 | all | extra suffix states from retained prefixes; never replaces reverse states |
 | `stitch_bias` | 1 | contexts with 3+ steps | shifts the balanced stitch layer |

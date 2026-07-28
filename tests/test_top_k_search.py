@@ -30,6 +30,8 @@ def test_shared_experiment_defaults_match_the_live_top_k_signature() -> None:
     assert {
         name: parameters[name].default for name in ACTIVE_TOP_K_DEFAULTS
     } == ACTIVE_TOP_K_DEFAULTS
+    assert "continuation_log_gap" not in parameters
+    assert "heuristic_reserve_limit" not in parameters
 
 
 def test_two_step_top_k_matches_the_exact_oracle() -> None:
@@ -62,8 +64,6 @@ def test_two_step_top_k_matches_the_exact_oracle() -> None:
     assert report["complete_plan_candidates"] == 2
     assert report["forward_proposals_evaluated"] == 2
     assert report["stitch_pairs"] == 0
-    assert report["heuristic_reserve_triggers"] == 0
-    assert report["heuristic_reserve_proposals"] == 0
     assert report["active_trace_targets"] == []
 
 

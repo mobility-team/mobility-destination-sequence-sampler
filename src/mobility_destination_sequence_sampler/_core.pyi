@@ -65,8 +65,6 @@ class TopKReport(TypedDict):
     local_score_cache_hits: int
     local_score_cache_builds: int
     continuation_proposals: int
-    heuristic_reserve_triggers: int
-    heuristic_reserve_proposals: int
     seam_refresh_proposals: int
     seam_refresh_states: int
     pricing_candidate_evaluations: int
@@ -140,10 +138,8 @@ class DestinationPlanSearch:
         stitch_bias: int = 1,
         continuation_state_limit: int = 1,
         deep_continuation_state_limit: int = 2,
-        continuation_log_gap: float = 0.0,
         continuation_proposal_limit: int = 1,
         seam_refresh_per_prefix: int = 1,
-        heuristic_reserve_limit: int = 0,
         pricing_passes: int = 2,
         pricing_seed_limit: int = 10,
         pricing_column_limit: int = 4,

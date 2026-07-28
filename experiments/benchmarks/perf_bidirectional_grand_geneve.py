@@ -234,8 +234,6 @@ def main() -> None:
         f"complete-plan-candidates={bidirectional_report['complete_plan_candidates']} "
         f"forward-proposals={bidirectional_report['forward_proposals_evaluated']} "
         f"backward-proposals={bidirectional_report['backward_proposals_evaluated']} "
-        f"heuristic-reserve={bidirectional_report['heuristic_reserve_triggers']}/"
-        f"{bidirectional_report['heuristic_reserve_proposals']} triggers/proposals "
         f"refresh-proposals={bidirectional_report['seam_refresh_proposals']} "
         f"refresh-states={bidirectional_report['seam_refresh_states']} "
         f"pricing-rounds={bidirectional_report['pricing_rounds']} "

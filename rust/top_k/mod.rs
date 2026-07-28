@@ -321,8 +321,6 @@ pub struct TopKReport {
     pub local_score_cache_hits: u64,
     pub local_score_cache_builds: u64,
     pub continuation_proposals: u64,
-    pub heuristic_reserve_triggers: u64,
-    pub heuristic_reserve_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
     pub pricing_candidate_evaluations: u64,
@@ -418,12 +416,8 @@ pub struct TopKOptions {
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
     pub deep_continuation_state_limit: usize,
-    /// Retain reverse-guidance alternatives whose score is within this log
-    /// utility band of the best. Zero preserves fixed-width behavior.
-    pub continuation_log_gap: f64,
     pub continuation_proposal_limit: usize,
     pub seam_refresh_per_prefix: usize,
-    pub heuristic_reserve_limit: usize,
     /// Iterative exact single-variable pricing rounds over completed paths.
     /// Zero leaves the production search unchanged.
     pub pricing_passes: usize,
@@ -463,10 +457,8 @@ impl TopKOptions {
             stitch_bias: 1,
             continuation_state_limit: 1,
             deep_continuation_state_limit: 2,
-            continuation_log_gap: 0.0,
             continuation_proposal_limit: 1,
             seam_refresh_per_prefix: 1,
-            heuristic_reserve_limit: 0,
             pricing_passes: 2,
             pricing_seed_limit: 10,
             pricing_column_limit: 4,
@@ -745,8 +737,6 @@ impl TopKReport {
         self.local_score_cache_hits += other.local_score_cache_hits;
         self.local_score_cache_builds += other.local_score_cache_builds;
         self.continuation_proposals += other.continuation_proposals;
-        self.heuristic_reserve_triggers += other.heuristic_reserve_triggers;
-        self.heuristic_reserve_proposals += other.heuristic_reserve_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
         self.pricing_candidate_evaluations += other.pricing_candidate_evaluations;
@@ -796,30 +786,6 @@ fn select_beam_indices(scores: &[f64], beam_width: usize) -> Vec<usize> {
         .into_iter()
         .take(beam_width)
         .map(|(index, _)| index)
-        .collect()
-}
-
-/// Score-ranked states in a bounded near-optimal band. The best state is
-/// always retained; a zero band intentionally keeps the historical fixed
-/// width selection behavior.
-fn select_guidance_indices(scores: &[f64], max_width: usize, log_gap: f64) -> Vec<usize> {
-    if scores.is_empty() {
-        return Vec::new();
-    }
-    if log_gap == 0.0 {
-        return select_beam_indices(scores, max_width);
-    }
-    let mut ranked = (0..scores.len()).collect::<Vec<_>>();
-    ranked.sort_unstable_by(|&left, &right| {
-        scores[right]
-            .total_cmp(&scores[left])
-            .then_with(|| left.cmp(&right))
-    });
-    let best = scores[ranked[0]];
-    ranked
-        .into_iter()
-        .take_while(|&index| scores[index] >= best - log_gap)
-        .take(max_width)
         .collect()
 }
 
