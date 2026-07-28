@@ -62,6 +62,17 @@ evidence.
 
 ## Discovery, validation, and immutable configurations
 
+Before implementing a search heuristic, pass this admission gate:
+
+- show the mechanism in representative failures and estimate its quality/work
+  upper bound;
+- check `experiments/historical.md` for overlap with an existing channel;
+- prefer a read-only diagnostic, and stop unless the estimated gain is
+  material;
+- treat another beam/candidate heuristic as marginal until measured otherwise;
+- label unmeasured ideas as speculative. Fail-fast execution does not justify
+  optimistic framing.
+
 Keep discovery cheap: use `explore-quality` and `explore-throughput` with one
 `NAME=VALUE` change. They prepare inputs once and compare A/B in the same
 process; exact certificates are reused. Canaries and command-line overrides
