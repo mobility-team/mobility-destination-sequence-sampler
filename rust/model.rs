@@ -33,9 +33,6 @@ pub struct OdGraph {
     outgoing_cost_edge_indices: Vec<u32>,
     incoming_offsets: Vec<usize>,
     incoming_cost_edge_indices: Vec<u32>,
-    outgoing_cost_bands: Vec<u8>,
-    outgoing_time_bands: Vec<u8>,
-    incoming_time_bands: Vec<u8>,
     dense_edge_indices: Option<Vec<usize>>,
     dense_travel: Option<DenseTravel>,
 }
@@ -141,45 +138,6 @@ impl OdGraph {
                 });
         }
 
-        let mut outgoing_cost_bands = vec![0; edges.len()];
-        let mut outgoing_time_bands = vec![0; edges.len()];
-        for origin in 0..zone_ids.len() {
-            let start = offsets[origin];
-            let end = offsets[origin + 1];
-            let count = end - start;
-            for (rank, &edge_index) in outgoing_cost_edge_indices[start..end].iter().enumerate() {
-                outgoing_cost_bands[edge_index as usize] = (4 * rank / count) as u8;
-            }
-            let mut by_time = (start..end).collect::<Vec<_>>();
-            by_time.sort_unstable_by(|&left, &right| {
-                edges[left]
-                    .time
-                    .total_cmp(&edges[right].time)
-                    .then_with(|| edges[left].destination.cmp(&edges[right].destination))
-            });
-            for (rank, edge_index) in by_time.into_iter().enumerate() {
-                outgoing_time_bands[edge_index] = (4 * rank / count) as u8;
-            }
-        }
-        let mut incoming_time_bands = vec![0; edges.len()];
-        for destination in 0..zone_ids.len() {
-            let edge_indices = &incoming_cost_edge_indices
-                [incoming_offsets[destination]..incoming_offsets[destination + 1]];
-            let count = edge_indices.len();
-            let mut by_time = edge_indices.to_vec();
-            by_time.sort_unstable_by(|&left, &right| {
-                let left = left as usize;
-                let right = right as usize;
-                edges[left]
-                    .time
-                    .total_cmp(&edges[right].time)
-                    .then_with(|| edge_origins[left].cmp(&edge_origins[right]))
-            });
-            for (rank, edge_index) in by_time.into_iter().enumerate() {
-                incoming_time_bands[edge_index as usize] = (4 * rank / count) as u8;
-            }
-        }
-
         // Bounded search repeatedly looks up a small number of exact OD
         // pairs. A dense index is cheap for near-complete matrices such as
         // Grand Genève, while sparse regional or national graphs keep the CSR
@@ -235,9 +193,6 @@ impl OdGraph {
             outgoing_cost_edge_indices,
             incoming_offsets,
             incoming_cost_edge_indices,
-            outgoing_cost_bands,
-            outgoing_time_bands,
-            incoming_time_bands,
             dense_edge_indices,
             dense_travel,
         })
@@ -319,21 +274,6 @@ impl OdGraph {
             .ok()
             .map(|index| self.offsets[origin] + index)
     }
-
-    #[inline]
-    pub fn surface_bands(
-        &self,
-        origin: usize,
-        destination: usize,
-        next: usize,
-    ) -> Option<(u8, u8)> {
-        let inbound = self.edge_index_to(origin, destination)?;
-        let outbound = self.edge_index_to(destination, next)?;
-        Some((
-            self.outgoing_cost_bands[inbound],
-            self.outgoing_time_bands[inbound].max(self.incoming_time_bands[outbound]),
-        ))
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -349,7 +289,6 @@ pub struct DestinationIndex {
     by_activity: HashMap<u32, Vec<Option<DestinationValue>>>,
     domains_by_activity: HashMap<u32, Vec<usize>>,
     attractive_by_activity: HashMap<u32, Vec<usize>>,
-    attraction_bands_by_activity: HashMap<u32, Vec<u8>>,
 }
 
 impl DestinationIndex {
@@ -439,21 +378,10 @@ impl DestinationIndex {
                 )
             })
             .collect();
-        let attraction_bands_by_activity = attractive_by_activity
-            .iter()
-            .map(|(&activity_id, ranked)| {
-                let mut bands = vec![u8::MAX; graph.zone_ids.len()];
-                for (rank, &zone) in ranked.iter().enumerate() {
-                    bands[zone] = (4 * rank / ranked.len()) as u8;
-                }
-                (activity_id, bands)
-            })
-            .collect();
         Ok(Self {
             by_activity,
             domains_by_activity,
             attractive_by_activity,
-            attraction_bands_by_activity,
         })
     }
 
@@ -476,12 +404,5 @@ impl DestinationIndex {
         self.attractive_by_activity
             .get(&activity_id)
             .map(Vec::as_slice)
-    }
-
-    #[inline]
-    pub fn attraction_band(&self, activity_id: u32, destination: usize) -> Option<u8> {
-        self.attraction_bands_by_activity
-            .get(&activity_id)
-            .and_then(|bands| (bands[destination] != u8::MAX).then_some(bands[destination]))
     }
 }

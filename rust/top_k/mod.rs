@@ -32,8 +32,7 @@ mod stitch;
 
 use backward::{backward_beam, extend_backward_guidance};
 use candidates::{
-    candidates, reverse_projection_candidates, surface_candidates, CandidateCache, CandidateInputs,
-    CandidateQuery,
+    candidates, reverse_projection_candidates, CandidateCache, CandidateInputs, CandidateQuery,
 };
 use factor_maps::{
     factor_map_candidates, reverse_factor_map_candidates, reverse_prefix_partial_score,
@@ -47,7 +46,6 @@ pub use stitch::search_top_k_all;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandidateStrategy {
     Heuristic,
-    Surface,
     FactorMap,
     SymmetricFactorMap,
     AdaptiveFactorMap,
@@ -57,12 +55,11 @@ impl CandidateStrategy {
     pub(crate) fn parse(value: &str) -> Result<Self, SamplerError> {
         match value {
             "heuristic" => Ok(Self::Heuristic),
-            "surface" => Ok(Self::Surface),
             "factor_map" => Ok(Self::FactorMap),
             "symmetric_factor_map" => Ok(Self::SymmetricFactorMap),
             "adaptive_factor_map" => Ok(Self::AdaptiveFactorMap),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'surface', 'factor_map', 'symmetric_factor_map', 'adaptive_factor_map', or 'heuristic'"
+                "candidate_strategy must be 'factor_map', 'symmetric_factor_map', 'adaptive_factor_map', or 'heuristic'"
                     .to_string(),
             )),
         }
@@ -303,7 +300,6 @@ pub struct TopKReport {
     pub contexts: u64,
     pub forward_candidate_evaluations: u64,
     pub backward_candidate_evaluations: u64,
-    pub surface_proposal_evaluations: u64,
     pub factor_map_destination_evaluations: u64,
     pub factor_map_previous_hits: u64,
     pub factor_map_previous_builds: u64,
@@ -341,7 +337,6 @@ pub struct TopKReport {
     pub backward_guidance_ns: u64,
     pub forward_search_ns: u64,
     pub continuation_guidance_ns: u64,
-    pub surface_proposal_ns: u64,
     pub factor_map_ns: u64,
     pub seam_refresh_ns: u64,
     pub pricing_ns: u64,
@@ -411,7 +406,6 @@ pub struct TopKOptions {
     pub symmetric_state_limit: usize,
     pub symmetric_forward_proposal_limit: usize,
     pub candidate_strategy: CandidateStrategy,
-    pub surface_bins: usize,
     pub factor_map_max_depth: usize,
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
@@ -452,7 +446,6 @@ impl TopKOptions {
             symmetric_state_limit: 4,
             symmetric_forward_proposal_limit: 20,
             candidate_strategy: CandidateStrategy::AdaptiveFactorMap,
-            surface_bins: 2,
             factor_map_max_depth: 5,
             stitch_bias: 1,
             continuation_state_limit: 1,
@@ -719,7 +712,6 @@ impl TopKReport {
         self.contexts += other.contexts;
         self.forward_candidate_evaluations += other.forward_candidate_evaluations;
         self.backward_candidate_evaluations += other.backward_candidate_evaluations;
-        self.surface_proposal_evaluations += other.surface_proposal_evaluations;
         self.factor_map_destination_evaluations += other.factor_map_destination_evaluations;
         self.factor_map_previous_hits += other.factor_map_previous_hits;
         self.factor_map_previous_builds += other.factor_map_previous_builds;
@@ -758,7 +750,6 @@ impl TopKReport {
         self.backward_guidance_ns += other.backward_guidance_ns;
         self.forward_search_ns += other.forward_search_ns;
         self.continuation_guidance_ns += other.continuation_guidance_ns;
-        self.surface_proposal_ns += other.surface_proposal_ns;
         self.factor_map_ns += other.factor_map_ns;
         self.seam_refresh_ns += other.seam_refresh_ns;
         self.pricing_ns += other.pricing_ns;

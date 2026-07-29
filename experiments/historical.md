@@ -10,6 +10,7 @@
 | Single-suffix factor map | Rejected | Collapses proposals onto one speculative continuation. |
 | Eight-suffix factor map | Rejected | Splits a fixed candidate budget too thinly. |
 | Factor map depth 6 | Rejected | Long-chain guidance is too weak; weighted Mass@10 0.706. |
+| Binned surface proposals | Retired comparator | Unbinned factor maps replaced this coarse support policy. Keeping it required three edge-sized band arrays, two extra per-zone time sorts, and per-activity band storage in every search object; the code and public knobs were removed while its measurements remain in `BENCHMARKS.md`. |
 | Pure partial-map bootstrap | Rejected | One completed neighbouring factor collapses the beam: pilot Mass@10 0.491 vs 0.535 for factor-map. |
 | Full/local map union | Rejected | More candidates do not provide a valid continuation rank: Mass@10 0.505 and 5.7x slower than factor-map. |
 | Partial-screen map | Rejected | Small speed gain did not justify lower depth-five quality and fewer completed contexts. |

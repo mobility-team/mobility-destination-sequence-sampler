@@ -204,7 +204,6 @@ pub(super) fn search_context(
         options
     };
     let use_heuristic = match options.candidate_strategy {
-        CandidateStrategy::Surface => context.steps.len() > 4,
         CandidateStrategy::FactorMap | CandidateStrategy::SymmetricFactorMap => {
             home_bounded_depth > options.factor_map_max_depth
         }

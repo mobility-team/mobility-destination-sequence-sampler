@@ -22,9 +22,7 @@ pub(super) fn backward_beam(
         graph,
         destinations,
         context,
-        scoring: inputs.scoring(),
         candidate_count,
-        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     let use_factor_maps = inputs.options.candidate_strategy.uses_factor_maps();
@@ -206,9 +204,7 @@ pub(super) fn extend_backward_guidance(
         graph,
         destinations,
         context,
-        scoring: inputs.scoring(),
         candidate_count,
-        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     let started = profile.then(Instant::now);

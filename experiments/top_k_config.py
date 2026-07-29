@@ -13,7 +13,6 @@ ACTIVE_TOP_K_DEFAULTS = {
     "symmetric_state_limit": 4,
     "symmetric_forward_proposal_limit": 20,
     "candidate_strategy": "adaptive_factor_map",
-    "surface_bins": 2,
     "factor_map_max_depth": 5,
     "stitch_bias": 1,
     "continuation_state_limit": 1,
@@ -57,7 +56,6 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--candidate-strategy",
         choices=(
-            "surface",
             "factor_map",
             "symmetric_factor_map",
             "adaptive_factor_map",
@@ -65,12 +63,6 @@ def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         ),
         default=ACTIVE_TOP_K_DEFAULTS["candidate_strategy"],
         help="bounded proposal policy (default: adaptive_factor_map)",
-    )
-    parser.add_argument(
-        "--surface-bins",
-        type=int,
-        choices=(2, 4),
-        default=ACTIVE_TOP_K_DEFAULTS["surface_bins"],
     )
     parser.add_argument(
         "--factor-map-max-depth",

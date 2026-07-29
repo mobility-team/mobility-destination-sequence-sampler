@@ -78,9 +78,7 @@ pub(super) fn refresh_stitch_frontier(
         graph,
         destinations,
         context,
-        scoring: inputs.scoring(),
         candidate_count,
-        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     if refresh_per_prefix == 0 {

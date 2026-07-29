@@ -215,7 +215,6 @@ def main() -> None:
         f"symmetric-state-limit={args.symmetric_state_limit} "
         f"symmetric-forward-proposal-limit={args.symmetric_forward_proposal_limit} "
         f"candidate-strategy={args.candidate_strategy} "
-        f"surface-bins={args.surface_bins} "
         f"factor-map-max-depth={args.factor_map_max_depth} "
         f"continuation={args.continuation_state_limit}x{args.continuation_proposal_limit} "
         f"deep-continuation={args.deep_continuation_state_limit} "
@@ -283,10 +282,6 @@ def main() -> None:
                     - continuation_guidance_ns,
                 ),
                 ("continuation_guidance", continuation_guidance_ns),
-                (
-                    "surface_proposals",
-                    bidirectional_report["surface_proposal_ns"],
-                ),
                 ("factor_map", bidirectional_report["factor_map_ns"]),
                 ("seam_refresh", bidirectional_report["seam_refresh_ns"]),
                 ("pricing", bidirectional_report["pricing_ns"]),

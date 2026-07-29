@@ -5,7 +5,6 @@ from typing import Any, Literal, TypedDict
 
 CandidateStrategy = Literal[
     "heuristic",
-    "surface",
     "factor_map",
     "symmetric_factor_map",
     "adaptive_factor_map",
@@ -47,7 +46,6 @@ class TopKReport(TypedDict):
     contexts: int
     forward_proposals_evaluated: int
     backward_proposals_evaluated: int
-    surface_proposals_evaluated: int
     factor_map_destinations_evaluated: int
     factor_map_previous_hits: int
     factor_map_previous_builds: int
@@ -85,7 +83,6 @@ class TopKReport(TypedDict):
     backward_guidance_ns: int
     forward_search_ns: int
     continuation_guidance_ns: int
-    surface_proposal_ns: int
     factor_map_ns: int
     seam_refresh_ns: int
     pricing_ns: int
@@ -133,7 +130,6 @@ class DestinationPlanSearch:
         symmetric_state_limit: int = 4,
         symmetric_forward_proposal_limit: int = 20,
         candidate_strategy: CandidateStrategy = "adaptive_factor_map",
-        surface_bins: int = 2,
         factor_map_max_depth: int = 5,
         stitch_bias: int = 1,
         continuation_state_limit: int = 1,

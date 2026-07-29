@@ -267,8 +267,8 @@ pub(super) fn reverse_factor_map_candidates(
 
 /// Build exact, destination-resolution utility maps for every activity factor
 /// affected by choosing a forward destination. Missing entries are infeasible;
-/// no sentinel values are introduced. This is an experimental alternative to
-/// the binned surface: it ranks the intersection of the three maps directly.
+/// no sentinel values are introduced. Candidates rank the intersection of the
+/// three maps directly.
 pub(super) fn factor_map_candidates(
     inputs: &SearchInputs<'_>,
     request: FactorMapRequest<'_>,

@@ -32,6 +32,7 @@ def test_shared_experiment_defaults_match_the_live_top_k_signature() -> None:
     } == ACTIVE_TOP_K_DEFAULTS
     assert "continuation_log_gap" not in parameters
     assert "heuristic_reserve_limit" not in parameters
+    assert "surface_bins" not in parameters
 
 
 def test_two_step_top_k_matches_the_exact_oracle() -> None:

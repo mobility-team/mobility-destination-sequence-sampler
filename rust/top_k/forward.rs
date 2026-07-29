@@ -35,9 +35,7 @@ pub(super) fn forward_beam(
         graph,
         destinations,
         context,
-        scoring: inputs.scoring(),
         candidate_count,
-        surface_bins: inputs.options.surface_bins,
         exploration_seed: inputs.options.exploration_seed,
     };
     let started = profile.then(Instant::now);
@@ -82,23 +80,6 @@ pub(super) fn forward_beam(
                 Some(nodes[parent.parent.expect("non-root forward parent")].zone)
             };
             let mut candidate_zones = match (inputs.options.candidate_strategy, guidance_suffix) {
-                (CandidateStrategy::Surface, Some(suffix_index)) if unassigned => {
-                    let surface_started = profile.then(Instant::now);
-                    if context.steps[layer].fixed_destination.is_none() {
-                        report.surface_proposal_evaluations += destinations
-                            .domain(context.steps[layer].activity_id)
-                            .map_or(0, |domain| domain.len() as u64);
-                    }
-                    let result = surface_candidates(
-                        candidate_inputs,
-                        query,
-                        backward.nodes[suffix_index].zone,
-                    )?;
-                    if let Some(started) = surface_started {
-                        report.surface_proposal_ns += started.elapsed().as_nanos() as u64;
-                    }
-                    result
-                }
                 (strategy, Some(_))
                     if unassigned
                         && matches!(

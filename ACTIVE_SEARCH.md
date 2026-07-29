@@ -116,18 +116,19 @@ are the active production boundary, not a promise that every combination is
 meaningful. Pass only the knobs relevant to the selected strategy.
 Rejected zero-default policies are removed rather than kept as dormant
 branches; their decisions live in `experiments/historical.md` and their source
-in the research archive tag.
+in the research archive tag. The dominated binned-surface comparator is also
+retired: its edge and activity-band indexes imposed construction and memory
+cost on every search object despite having no active consumer.
 
 | Setting | Default | Applies to | Effect / constraint |
 |---|---:|---|---|
 | `frontier_width` | 40 | all | retained states on the main beams |
 | `proposal_limit_per_source` | 16 | all | proposal support per retained source |
-| `candidate_strategy` | `adaptive_factor_map` | all | `heuristic`, `surface`, `factor_map`, `symmetric_factor_map`, or active structural router |
+| `candidate_strategy` | `adaptive_factor_map` | all | `heuristic`, `factor_map`, `symmetric_factor_map`, or active structural router |
 | `factor_map_max_depth` | 5 | factor-map policies | longest home-bounded tour allowed before falling back to heuristic support |
 | `symmetric_message_limit` | 4 | symmetric only | partial reverse messages; zero disables that channel |
 | `symmetric_state_limit` | 4 | symmetric only | retained partial reverse states away from the seam |
 | `symmetric_forward_proposal_limit` | 20 | symmetric only | total compact partial-message proposals handed forward |
-| `surface_bins` | 2 | `surface` only | binned comparator resolution (2 or 4) |
 | `continuation_state_limit` | 1 | all | exact reverse guidance states consulted forward |
 | `deep_continuation_state_limit` | 2 | contexts deeper than `factor_map_max_depth` | wider exact reverse guidance for heuristic-support depths |
 | `continuation_proposal_limit` | 1 | all | reverse-projection proposals per guidance state |
@@ -144,7 +145,7 @@ in the research archive tag.
 | `exploration_seed` | required | all | deterministic exploration tie/support choices |
 | `top_k` | 10 | all | returned distinct plans; positive |
 
-`surface`, `factor_map`, `symmetric_factor_map`, and `heuristic` are retained comparators. Do not
+`factor_map`, `symmetric_factor_map`, and `heuristic` are retained comparators. Do not
 change active defaults based on a single context; use the quality harness and
 record the decision in the active experiment note.
 

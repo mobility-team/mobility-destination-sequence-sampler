@@ -90,7 +90,6 @@ def run_bounded(
         symmetric_state_limit=4,
         symmetric_forward_proposal_limit=8,
         candidate_strategy=strategy,
-        surface_bins=2,
         factor_map_max_depth=5,
         stitch_bias=1,
         continuation_state_limit=1,

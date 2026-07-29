@@ -41,7 +41,7 @@ impl DestinationPlanSearch {
     }
 
     /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_proposal_limit=1, seam_refresh_per_prefix=1, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_proposal_limit=1, seam_refresh_per_prefix=1, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -58,7 +58,6 @@ impl DestinationPlanSearch {
         symmetric_state_limit: usize,
         symmetric_forward_proposal_limit: usize,
         candidate_strategy: &str,
-        surface_bins: usize,
         factor_map_max_depth: usize,
         stitch_bias: i32,
         continuation_state_limit: usize,
@@ -92,11 +91,6 @@ impl DestinationPlanSearch {
                 "frontier_width, proposal_limit_per_source, continuation state limits, and continuation_proposal_limit must be positive".to_string(),
             )
             .into());
-        }
-        if !matches!(surface_bins, 2 | 4) {
-            return Err(
-                SamplerError::InvalidInput("surface_bins must be 2 or 4".to_string()).into(),
-            );
         }
         if factor_map_max_depth < 2 {
             return Err(SamplerError::InvalidInput(
@@ -150,7 +144,6 @@ impl DestinationPlanSearch {
                     symmetric_state_limit,
                     symmetric_forward_proposal_limit,
                     candidate_strategy,
-                    surface_bins,
                     factor_map_max_depth,
                     stitch_bias,
                     continuation_state_limit,
@@ -325,10 +318,6 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
         report.backward_candidate_evaluations,
     )?;
     result.set_item(
-        "surface_proposals_evaluated",
-        report.surface_proposal_evaluations,
-    )?;
-    result.set_item(
         "factor_map_destinations_evaluated",
         report.factor_map_destination_evaluations,
     )?;
@@ -432,7 +421,6 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("backward_guidance_ns", report.backward_guidance_ns)?;
     result.set_item("forward_search_ns", report.forward_search_ns)?;
     result.set_item("continuation_guidance_ns", report.continuation_guidance_ns)?;
-    result.set_item("surface_proposal_ns", report.surface_proposal_ns)?;
     result.set_item("factor_map_ns", report.factor_map_ns)?;
     result.set_item("seam_refresh_ns", report.seam_refresh_ns)?;
     result.set_item("pricing_ns", report.pricing_ns)?;
