@@ -16,6 +16,17 @@ struct Travel {
     time: f64,
 }
 
+impl Travel {
+    #[inline]
+    fn edge(self, destination: usize) -> Option<Edge> {
+        self.cost.is_finite().then_some(Edge {
+            destination,
+            cost: self.cost,
+            time: self.time,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct DenseTravel {
     forward: Vec<Travel>,
@@ -33,7 +44,6 @@ pub struct OdGraph {
     outgoing_cost_edge_indices: Vec<u32>,
     incoming_offsets: Vec<usize>,
     incoming_cost_edge_indices: Vec<u32>,
-    dense_edge_indices: Option<Vec<usize>>,
     dense_travel: Option<DenseTravel>,
 }
 
@@ -138,30 +148,10 @@ impl OdGraph {
                 });
         }
 
-        // Bounded search repeatedly looks up a small number of exact OD
-        // pairs. A dense index is cheap for near-complete matrices such as
-        // Grand Genève, while sparse regional or national graphs keep the CSR
-        // binary-search fallback.
         let dense_size = zone_ids.len().checked_mul(zone_ids.len());
-        let dense_edge_indices = dense_size
-            .filter(|&size| size <= edges.len().saturating_mul(4))
-            .map(|size| {
-                let mut indices = vec![usize::MAX; size];
-                for origin in 0..zone_ids.len() {
-                    let start = offsets[origin];
-                    let end = offsets[origin + 1];
-                    for (relative_index, edge) in edges[start..end].iter().enumerate() {
-                        let edge_index = start + relative_index;
-                        let destination = edge.destination;
-                        indices[origin * zone_ids.len() + destination] = edge_index;
-                    }
-                }
-                indices
-            });
-        // Factor-map scans have a fixed origin or destination and walk an
-        // activity domain.  Keep both dense orientations as compact travel
-        // values so those scans avoid an index indirection and, importantly,
-        // a cache-unfriendly column walk through the row-major edge store.
+        // Dense workloads use one authoritative point-lookup representation.
+        // Both orientations keep factor-map scans contiguous; sparse regional
+        // or national graphs retain the CSR binary-search fallback.
         let dense_travel = dense_size
             .filter(|&size| size <= edges.len().saturating_mul(4))
             .map(|size| {
@@ -193,7 +183,6 @@ impl OdGraph {
             outgoing_cost_edge_indices,
             incoming_offsets,
             incoming_cost_edge_indices,
-            dense_edge_indices,
             dense_travel,
         })
     }
@@ -226,53 +215,87 @@ impl OdGraph {
 
     #[inline]
     pub fn edge_to(&self, origin: usize, destination: usize) -> Option<Edge> {
-        self.edge_index_to(origin, destination)
-            .map(|edge_index| self.edges[edge_index])
+        if let Some(travel) = &self.dense_travel {
+            return travel.forward[origin * self.zone_ids.len() + destination].edge(destination);
+        }
+        self.outgoing(origin)
+            .binary_search_by_key(&destination, |edge| edge.destination)
+            .ok()
+            .map(|index| self.edges[self.offsets[origin] + index])
     }
 
     /// Exact travel edge read from the row-major dense factor-map view when
     /// available. Sparse graphs retain the regular CSR lookup.
     #[inline]
     pub fn factor_edge_from(&self, origin: usize, destination: usize) -> Option<Edge> {
-        self.dense_travel
-            .as_ref()
-            .and_then(|travel| {
-                let value = travel.forward[origin * self.zone_ids.len() + destination];
-                value.cost.is_finite().then_some(Edge {
-                    destination,
-                    cost: value.cost,
-                    time: value.time,
-                })
-            })
-            .or_else(|| self.edge_to(origin, destination))
+        if let Some(travel) = &self.dense_travel {
+            return travel.forward[origin * self.zone_ids.len() + destination].edge(destination);
+        }
+        self.edge_to(origin, destination)
     }
 
     /// Exact travel edge read from the destination-major dense factor-map
     /// view. This makes a varying origin with a fixed destination contiguous.
     #[inline]
     pub fn factor_edge_to(&self, origin: usize, destination: usize) -> Option<Edge> {
-        self.dense_travel
-            .as_ref()
-            .and_then(|travel| {
-                let value = travel.transpose[destination * self.zone_ids.len() + origin];
-                value.cost.is_finite().then_some(Edge {
-                    destination,
-                    cost: value.cost,
-                    time: value.time,
-                })
-            })
-            .or_else(|| self.edge_to(origin, destination))
+        if let Some(travel) = &self.dense_travel {
+            return travel.transpose[destination * self.zone_ids.len() + origin].edge(destination);
+        }
+        self.edge_to(origin, destination)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(origin: u32, destination: u32, cost: f64) -> OdCostRow {
+        OdCostRow {
+            origin,
+            destination,
+            cost,
+            time: cost + 1.0,
+        }
     }
 
-    fn edge_index_to(&self, origin: usize, destination: usize) -> Option<usize> {
-        if let Some(indices) = &self.dense_edge_indices {
-            let edge_index = indices[origin * self.zone_ids.len() + destination];
-            return (edge_index != usize::MAX).then_some(edge_index);
+    fn assert_edge(graph: &OdGraph, origin: usize, destination: usize, cost: f64) {
+        for edge in [
+            graph.edge_to(origin, destination),
+            graph.factor_edge_from(origin, destination),
+            graph.factor_edge_to(origin, destination),
+        ] {
+            let edge = edge.expect("edge should exist");
+            assert_eq!(edge.destination, destination);
+            assert_eq!(edge.cost, cost);
+            assert_eq!(edge.time, cost + 1.0);
         }
-        self.outgoing(origin)
-            .binary_search_by_key(&destination, |edge| edge.destination)
-            .ok()
-            .map(|index| self.offsets[origin] + index)
+    }
+
+    fn assert_missing(graph: &OdGraph, origin: usize, destination: usize) {
+        assert!(graph.edge_to(origin, destination).is_none());
+        assert!(graph.factor_edge_from(origin, destination).is_none());
+        assert!(graph.factor_edge_to(origin, destination).is_none());
+    }
+
+    #[test]
+    fn dense_and_sparse_lookups_agree_on_present_and_missing_edges() {
+        let dense = OdGraph::build(vec![row(0, 1, 10.0), row(1, 2, 20.0), row(2, 0, 30.0)])
+            .expect("dense graph should build");
+        assert!(dense.dense_travel.is_some());
+        assert_edge(&dense, 0, 1, 10.0);
+        assert_missing(&dense, 0, 2);
+
+        let sparse = OdGraph::build(vec![
+            row(0, 1, 10.0),
+            row(1, 2, 20.0),
+            row(2, 3, 30.0),
+            row(3, 4, 40.0),
+            row(4, 0, 50.0),
+        ])
+        .expect("sparse graph should build");
+        assert!(sparse.dense_travel.is_none());
+        assert_edge(&sparse, 0, 1, 10.0);
+        assert_missing(&sparse, 0, 2);
     }
 }
 
