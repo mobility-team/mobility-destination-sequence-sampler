@@ -84,7 +84,7 @@ def profile_context(
         **top_k_tuning_options(args),
         top_k=args.top_k,
         n_threads=1,
-        skip_infeasible=False,
+        skip_contexts_without_plan=False,
         collect_profile=True,
     )
 
@@ -130,7 +130,7 @@ def main() -> None:
         **top_k_tuning_options(args),
         top_k=args.top_k,
         n_threads=args.threads,
-        skip_infeasible=True,
+        skip_contexts_without_plan=True,
     )
     support = pl.DataFrame(returned_support_rows(returned, args.top_k)).filter(
         pl.col("returned") >= args.top_k
@@ -168,7 +168,7 @@ def main() -> None:
             chosen.append(("concentrated", control_id))
     print(
         f"candidate contexts={selected.height}; returned={support.height} complete top-{args.top_k}; "
-        f"infeasible={report['infeasible_contexts']}"
+        f"contexts-without-plan={report['contexts_without_plan']}"
     )
     rows = []
     for group, context_id in chosen:

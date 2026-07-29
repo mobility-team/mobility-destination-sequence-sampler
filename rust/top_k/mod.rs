@@ -373,7 +373,9 @@ pub struct TopKReport {
     pub pricing_rounds: u64,
     pub stitch_pairs: u64,
     pub completed_plans: u64,
-    pub infeasible_contexts: u64,
+    /// Contexts for which bounded search returned no complete feasible plan.
+    /// This is not proof that the model inputs admit no feasible plan.
+    pub contexts_without_plan: u64,
     pub build_problem_ns: u64,
     pub backward_search_ns: u64,
     pub backward_guidance_ns: u64,
@@ -785,7 +787,7 @@ impl TopKReport {
         self.pricing_rounds += other.pricing_rounds;
         self.stitch_pairs += other.stitch_pairs;
         self.completed_plans += other.completed_plans;
-        self.infeasible_contexts += other.infeasible_contexts;
+        self.contexts_without_plan += other.contexts_without_plan;
         self.build_problem_ns += other.build_problem_ns;
         self.backward_search_ns += other.backward_search_ns;
         self.backward_guidance_ns += other.backward_guidance_ns;

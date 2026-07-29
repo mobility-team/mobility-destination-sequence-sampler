@@ -812,7 +812,7 @@ def compare_bounded_to_cached_exact(
         **ACTIVE_TOP_K_DEFAULTS,
         top_k=10,
         n_threads=args.threads,
-        skip_infeasible=True,
+        skip_contexts_without_plan=True,
     )
     elapsed = time.perf_counter() - started
     exact_plans = plan_scores(exact)
@@ -1046,7 +1046,7 @@ def compare_bounded_to_cached_exact(
         f"contexts={quality.height} wall={elapsed:.3f}s "
         f"mean-mass={quality['mass_at_10'].mean():.3f} "
         f"top1-hit={quality['top1_hit'].mean():.1%} "
-        f"infeasible={report['infeasible_contexts']}"
+        f"contexts-without-plan={report['contexts_without_plan']}"
     )
     print(
         "Candidate-lattice closure upper bound from returned per-variable zones: "
@@ -1219,7 +1219,7 @@ def trace_internal_support_mass(
                 **ACTIVE_TOP_K_DEFAULTS,
                 top_k=10,
                 n_threads=1,
-                skip_infeasible=False,
+                skip_contexts_without_plan=False,
                 active_trace_context_id=context_id,
                 active_trace_target_plans=[
                     list(zones) for zones, _ in reference
@@ -1283,7 +1283,7 @@ def analyze_outputs(
         **top_k_tuning_options(options),
         top_k=args.top_k,
         n_threads=args.threads,
-        skip_infeasible=True,
+        skip_contexts_without_plan=True,
     )
     elapsed = time.perf_counter() - started
     print("\nLOCATED BOUNDED OUTPUT SEARCH")
@@ -1291,7 +1291,7 @@ def analyze_outputs(
         f"sampled-contexts={args.output_contexts} returned-contexts="
         f"{returned['context_id'].n_unique()} rows={returned.height} "
         f"top-k={args.top_k} wall={elapsed:.3f}s "
-        f"infeasible={report['infeasible_contexts']}"
+        f"contexts-without-plan={report['contexts_without_plan']}"
     )
 
     od_ranks = ranked_od(od_costs)

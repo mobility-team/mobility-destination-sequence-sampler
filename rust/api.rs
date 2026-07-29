@@ -44,8 +44,9 @@ impl DestinationPlanSearch {
     ///
     /// Every returned plan receives its full model utility, but shortlisting
     /// and partial-plan pruning can omit a globally better plan. Most callers
-    /// should keep the search-tuning defaults unchanged.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_proposal_limit=1, seam_refresh_per_prefix=1, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
+    /// should keep the search-tuning defaults unchanged. The report always
+    /// states `top_k_is_proven=false`.
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_proposal_limit=1, seam_refresh_per_prefix=1, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_contexts_without_plan=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -78,7 +79,7 @@ impl DestinationPlanSearch {
         pricing_min_layers: usize,
         top_k: u32,
         n_threads: Option<usize>,
-        skip_infeasible: bool,
+        skip_contexts_without_plan: bool,
         collect_profile: bool,
         active_trace_context_id: Option<u64>,
         active_trace_target_plans: Option<Vec<Vec<u32>>>,
@@ -131,9 +132,9 @@ impl DestinationPlanSearch {
             logit_scale,
             update_plan_timings,
             use_shadow_prices,
-            skip_infeasible,
+            skip_infeasible: skip_contexts_without_plan,
         };
-        let (output, report) = py.allow_threads(|| {
+        let search_result = py.allow_threads(|| {
             search_top_k_all(
                 &self.graph,
                 &self.destination_index,
@@ -167,7 +168,13 @@ impl DestinationPlanSearch {
                 },
                 n_threads,
             )
-        })?;
+        });
+        let (output, report) = match search_result {
+            Err(SamplerError::NoFeasibleSequence { context_id, origin }) => {
+                return Err(SamplerError::BoundedSearchNoPlan { context_id, origin }.into());
+            }
+            result => result?,
+        };
         Ok(PyTuple::new(
             py,
             [
@@ -178,10 +185,12 @@ impl DestinationPlanSearch {
         .into())
     }
 
-    /// Prove the highest-utility complete plans or stop at `max_states`.
+    /// Prove the highest-utility complete plans or report `proof incomplete`
+    /// at `max_states`.
     ///
     /// This is a validation oracle for small samples, not a production
-    /// fallback when `top_k` misses a plan.
+    /// fallback when `top_k` misses a plan. A successful report always states
+    /// `top_k_is_proven=true`.
     #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, top_k=10, max_states=2_000_000, n_threads=None, skip_infeasible=false, use_bounded_incumbent=true))]
     #[allow(clippy::too_many_arguments)]
     fn exact_top_k(
@@ -212,7 +221,7 @@ impl DestinationPlanSearch {
             use_shadow_prices,
             skip_infeasible,
         };
-        let (output, report) = py.allow_threads(|| {
+        let exact_result = py.allow_threads(|| {
             let seed_output = if use_bounded_incumbent && top_k <= u32::MAX as usize {
                 let mut seed_parameters = parameters;
                 seed_parameters.skip_infeasible = true;
@@ -240,7 +249,19 @@ impl DestinationPlanSearch {
                 n_threads,
                 seed_output.as_ref(),
             )
-        })?;
+        });
+        let (output, report) = match exact_result {
+            Err(SamplerError::InvalidInput(message)) if message.contains("exceeded max_states") => {
+                let detail = message
+                    .strip_prefix("heap reference search ")
+                    .unwrap_or(&message);
+                return Err(SamplerError::InvalidInput(format!(
+                    "exact_top_k proof incomplete: {detail}"
+                ))
+                .into());
+            }
+            result => result?,
+        };
         Ok(PyTuple::new(
             py,
             [
@@ -254,6 +275,7 @@ impl DestinationPlanSearch {
 
 fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObject> {
     let result = PyDict::new(py);
+    result.set_item("top_k_is_proven", false)?;
     result.set_item("contexts", report.contexts)?;
     result.set_item(
         "forward_proposals_evaluated",
@@ -361,7 +383,7 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
     result.set_item("pricing_rounds", report.pricing_rounds)?;
     result.set_item("stitch_pairs", report.stitch_pairs)?;
     result.set_item("complete_plan_candidates", report.completed_plans)?;
-    result.set_item("infeasible_contexts", report.infeasible_contexts)?;
+    result.set_item("contexts_without_plan", report.contexts_without_plan)?;
     result.set_item("build_problem_ns", report.build_problem_ns)?;
     result.set_item("backward_search_ns", report.backward_search_ns)?;
     result.set_item("backward_guidance_ns", report.backward_guidance_ns)?;
@@ -417,6 +439,7 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
 
 fn heap_report_to_dict(py: Python<'_>, report: &HeapSearchReport) -> PyResult<PyObject> {
     let result = PyDict::new(py);
+    result.set_item("top_k_is_proven", true)?;
     result.set_item("contexts", report.contexts)?;
     result.set_item("split_contexts", report.split_contexts)?;
     result.set_item(

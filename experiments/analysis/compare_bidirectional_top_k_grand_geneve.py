@@ -925,7 +925,7 @@ def compare_seed(
                     **top_k_tuning_options(args),
                     top_k=top_k,
                     n_threads=1,
-                    skip_infeasible=False,
+                    skip_contexts_without_plan=False,
                     **active_trace,
                 )
                 bounded_search_seconds[top_k] += time.perf_counter() - bounded_started

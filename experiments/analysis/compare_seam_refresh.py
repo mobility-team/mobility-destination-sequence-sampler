@@ -130,7 +130,7 @@ def main() -> None:
                 seam_refresh_per_prefix=refresh_per_prefix,
                 top_k=args.top_k,
                 n_threads=1,
-                skip_infeasible=False,
+                skip_contexts_without_plan=False,
             )
             plans = ranked_plans(table)
             plan_zones = {zones for zones, _ in plans}

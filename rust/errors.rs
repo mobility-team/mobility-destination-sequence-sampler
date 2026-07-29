@@ -10,6 +10,10 @@ pub enum SamplerError {
     Python(String),
     #[error("context {context_id} has no feasible destination sequence from zone {origin}")]
     NoFeasibleSequence { context_id: u64, origin: u32 },
+    #[error(
+        "bounded search found no feasible destination sequence for context {context_id} from zone {origin}; this does not prove the context is infeasible"
+    )]
+    BoundedSearchNoPlan { context_id: u64, origin: u32 },
 }
 
 impl From<PyErr> for SamplerError {

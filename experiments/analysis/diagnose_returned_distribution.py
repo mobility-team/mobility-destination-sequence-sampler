@@ -105,7 +105,7 @@ def main() -> None:
         **top_k_tuning_options(args),
         top_k=args.top_k,
         n_threads=args.threads,
-        skip_infeasible=True,
+        skip_contexts_without_plan=True,
     )
     elapsed = time.perf_counter() - started
     grouped = returned.group_by(["context_id", "draw_id"]).agg(
@@ -122,7 +122,7 @@ def main() -> None:
     print(
         f"returned-support diagnostic: contexts={frame.height}/{args.contexts} "
         f"complete-top-{args.top_k}={complete.height} wall={elapsed:.3f}s "
-        f"infeasible={report['infeasible_contexts']}"
+        f"contexts-without-plan={report['contexts_without_plan']}"
     )
     print("All mass is conditional on the returned support, not full exp(U) mass.")
     print("metric | mean | p10 | p50 | p90")

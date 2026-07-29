@@ -25,23 +25,25 @@ uses the listed workload, release build, and configuration.
 ## Quality terms
 
 - **Recall@K**: fraction of exact top-K plans recovered.
-- **Mass@K**: exact top-K probability mass retained by the bounded result.
+- **Mass@K**: probability mass of exact top-K plans retained by the bounded
+  result, normalized within those K reference plans (not the full feasible
+  distribution).
 - **Mass@500**: bounded result mass in one fixed exact top-500 reference;
   use it to compare differing requested K values.
 - **Efficiency**: bounded result mass divided by the fixed reference mass as
   reported by the harness.
-- **Complete / infeasible**: contexts that yielded a complete sequence or
-  none under the supplied feasibility/scoring inputs; this is not an oracle
-  accuracy measure.
+- **Complete / without plan**: contexts for which bounded search returned a
+  complete sequence or returned none. "Without plan" is not proof of model
+  infeasibility and is not an oracle accuracy measure.
 
 The returned-support diagnostic normalizes only over the bounded plans it
 received (normally top-100). It is useful for comparing head concentration and
 detecting flat returned supports, but it is a lower-bound diagnostic—not an
 estimate of the full exp(U) distribution.
 
-The oracle may reject a context at `max_states`. Coverage and exclusions from
-that outcome must remain visible; do not silently treat an unproven context as
-a bounded miss or hit.
+The oracle reports `proof incomplete` when it reaches `max_states`. Coverage
+and exclusions from that outcome must remain visible; do not silently treat an
+unproven context as a bounded miss or hit.
 
 The oracle cache has two identities. Completed exact certificates depend only
 on inputs plus exact feasibility/scoring/oracle semantics and remain reusable

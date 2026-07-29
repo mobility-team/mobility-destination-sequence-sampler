@@ -185,7 +185,7 @@ def main() -> None:
                 **ACTIVE_TOP_K_DEFAULTS,
                 top_k=args.top_k,
                 n_threads=1,
-                skip_infeasible=False,
+                skip_contexts_without_plan=False,
                 collect_profile=True,
             )
         except ValueError:

@@ -159,11 +159,13 @@ the active boundary.
 
 The returned output has one row per `(context_id, draw_id, layer)`: `origin`,
 `destination`, `local_log_weight`, and the plan-level `total_log_weight`.
-Draws are descending by total utility. With `collect_profile=True`, the
-bounded report also exposes proposal counts and per-pass nanosecond timings;
-pair probe/expansion counts are included. Supplying an active trace also emits
-per-pair probe signals for offline router analysis; their key names are
-declared in `_core.pyi`.
+Draws are descending by total utility. The report explicitly distinguishes
+bounded (`top_k_is_proven=false`) from successfully proven exact results
+(`true`) and calls bounded omissions `contexts_without_plan`, not infeasible
+contexts. With `collect_profile=True`, the bounded report also exposes
+proposal counts and per-pass nanosecond timings; pair probe/expansion counts
+are included. Supplying an active trace also emits per-pair probe signals for
+offline router analysis; their key names are declared in `_core.pyi`.
 
 `exact_top_k()` initializes branch-and-bound with the active bounded result by
 default. This changes pruning only, never the proof result; pass

@@ -150,7 +150,7 @@ def run_search(
         **options,
         top_k=args.top_k,
         n_threads=1,
-        skip_infeasible=True,
+        skip_contexts_without_plan=True,
         collect_profile=True,
         **trace_options,
     )

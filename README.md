@@ -5,8 +5,8 @@ oracle. Mobility prepares inputs; this package owns destination choice.
 
 Transport modeller? Start with
 [`MODELLER_GUIDE.md`](MODELLER_GUIDE.md). It explains the algorithm with a
-small activity-plan example, translates the search terminology, lists common
-misreadings, and gives a one-context debugging workflow.
+small activity-plan example, makes the search guarantees explicit, translates
+the terminology, and gives a one-context debugging workflow.
 
 ## Public API
 
@@ -14,13 +14,14 @@ misreadings, and gives a one-context debugging workflow.
 
 | Method | Purpose |
 |---|---|
-| `top_k()` | Bounded bidirectional search. Approximate, exact-score-ranked returned plans. |
-| `exact_top_k()` | Small-context oracle. Proves the requested top-K or raises at `max_states`. |
+| `top_k()` | Fast bounded search. Fully scores returned plans but does not prove they are the global top-K. |
+| `exact_top_k()` | Small-context oracle. Proves the requested top-K or raises `proof incomplete` at `max_states`. |
 
 `top_k()` shortlists plausible destinations, grows partial plans from both
 ends, joins them near the middle, improves the best complete plans, and ranks
 them with the full rigidity-aware utility. Repeated anchors remain the same
-destination throughout a plan.
+destination throughout a plan. Its report contains `top_k_is_proven=False`; a
+successfully completed exact report contains `top_k_is_proven=True`.
 See [`DESIGN.md`](DESIGN.md) for schemas and invariants.
 
 Only those paths are in the working tree. Particle, exhaustive-sampling, and

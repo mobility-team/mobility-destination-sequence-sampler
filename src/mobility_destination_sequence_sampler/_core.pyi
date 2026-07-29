@@ -43,6 +43,7 @@ class PricingPairProbeReport(TypedDict):
 
 
 class TopKReport(TypedDict):
+    top_k_is_proven: Literal[False]
     contexts: int
     forward_proposals_evaluated: int
     backward_proposals_evaluated: int
@@ -77,7 +78,7 @@ class TopKReport(TypedDict):
     pricing_rounds: int
     stitch_pairs: int
     complete_plan_candidates: int
-    infeasible_contexts: int
+    contexts_without_plan: int
     build_problem_ns: int
     backward_search_ns: int
     backward_guidance_ns: int
@@ -93,6 +94,7 @@ class TopKReport(TypedDict):
 
 
 class ExactTopKReport(TypedDict):
+    top_k_is_proven: Literal[True]
     contexts: int
     split_contexts: int
     conditioned_anchor_contexts: int
@@ -146,7 +148,7 @@ class DestinationPlanSearch:
         pricing_min_layers: int = 6,
         top_k: int = 10,
         n_threads: int | None = None,
-        skip_infeasible: bool = False,
+        skip_contexts_without_plan: bool = False,
         collect_profile: bool = False,
         active_trace_context_id: int | None = None,
         active_trace_target_plans: list[list[int]] | None = None,

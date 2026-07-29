@@ -190,7 +190,7 @@ def main() -> None:
             **top_k_tuning_options(args),
             top_k=args.top_k,
             n_threads=args.threads,
-            skip_infeasible=True,
+            skip_contexts_without_plan=True,
             collect_profile=args.profile,
         )
         runs.append((time.perf_counter() - started, bidirectional, bidirectional_report))
@@ -242,7 +242,7 @@ def main() -> None:
         f"pair-expansions={bidirectional_report['pricing_pair_expansions']} "
         f"improved-plans-added={bidirectional_report['pricing_plans_added']} "
         f"stitch-pairs={bidirectional_report['stitch_pairs']} "
-        f"infeasible={bidirectional_report['infeasible_contexts']}"
+        f"contexts-without-plan={bidirectional_report['contexts_without_plan']}"
     )
     print(
         "factor-map cache "

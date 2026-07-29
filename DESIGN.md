@@ -46,8 +46,8 @@ api.rs -> search_top_k_all() -> search_context()
   variables and repeated anchors, and uses ordinary factor maps when fixed
   destinations isolate every variable.
 - New passes take `SearchInputs` + `SearchScratch`, not long argument lists.
-- `oracle.rs`: exact top-K oracle; it proves or fails at
-  `max_states`, never approximates.
+- `oracle.rs`: exact top-K oracle; it proves the result or reports
+  `proof incomplete` at `max_states`, never approximates.
 
 ## Scoring invariant
 

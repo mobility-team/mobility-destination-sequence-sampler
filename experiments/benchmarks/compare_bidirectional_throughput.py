@@ -316,7 +316,7 @@ def main() -> None:
             **options_by_label[label],
             top_k=args.top_k,
             n_threads=args.threads,
-            skip_infeasible=True,
+            skip_contexts_without_plan=True,
             collect_profile=True,
         )
         fingerprint = output_fingerprint(output)

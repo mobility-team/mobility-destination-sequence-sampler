@@ -105,7 +105,7 @@ pub(super) fn search_two_step_context(
         scratch.report.forward_search_ns += started.elapsed().as_nanos() as u64;
     }
     if completed.is_empty() {
-        scratch.report.infeasible_contexts = 1;
+        scratch.report.contexts_without_plan = 1;
         return Err(SamplerError::NoFeasibleSequence {
             context_id: inputs.context.context_id,
             origin: inputs.context.initial_zone,
@@ -319,7 +319,7 @@ pub(super) fn search_context(
         }
     }
     if completed.is_empty() {
-        scratch.report.infeasible_contexts = 1;
+        scratch.report.contexts_without_plan = 1;
         return Err(SamplerError::NoFeasibleSequence {
             context_id: context.context_id,
             origin: context.initial_zone,
@@ -424,7 +424,7 @@ pub fn search_top_k_all(
             }
             Err(SamplerError::NoFeasibleSequence { .. }) if parameters.skip_infeasible => {
                 report.contexts += 1;
-                report.infeasible_contexts += 1;
+                report.contexts_without_plan += 1;
             }
             Err(error) => return Err(error),
         }

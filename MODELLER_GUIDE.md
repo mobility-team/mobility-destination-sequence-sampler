@@ -30,9 +30,10 @@ Steps 1 and 3 are bounded: a good sequence can be discarded. Steps 5 and 6
 cannot repair every possible discard. This is why `top_k()` is fast but not a
 proof of the global top K.
 
-`exact_top_k()` explores enough of the state space to prove the result, or
-stops explicitly at its state budget. It is a validation tool for small
-samples, not a production fallback.
+`exact_top_k()` explores enough of the state space to prove the result. If its
+state budget is exhausted, it raises a `proof incomplete` error rather than
+returning an approximation. It is a validation tool for small samples, not a
+production fallback.
 
 ## Words used in this repository
 
@@ -83,8 +84,8 @@ anchors may still cross it.
 
 ## Normal use
 
-Most callers should not pass search-tuning options. The active defaults are
-validated together and change only after quality/runtime experiments.
+Most callers should pass only model inputs, a deterministic exploration seed,
+and the number of plans wanted. Search-tuning defaults are validated together.
 
 ```python
 from mobility_destination_sequence_sampler import DestinationPlanSearch
@@ -102,7 +103,7 @@ plans, report = search.top_k(
     use_shadow_prices=True,
     exploration_seed=42,
     top_k=10,
-    skip_infeasible=True,
+    skip_contexts_without_plan=True,
 )
 ```
 
@@ -114,23 +115,41 @@ The output has one row per returned plan and sequence position. `draw_id=1`
 is the highest-utility returned plan. `total_log_weight` ranks complete plans;
 `local_log_weight` is the position-level contribution used for diagnosis.
 
-## What people commonly misread
+The report makes the search guarantee explicit:
+`report["top_k_is_proven"]` is `False` for `top_k()` and `True` for a
+successfully completed `exact_top_k()`. Increasing `top_k` asks for more
+returned plans; it does not increase proof effort or make bounded search exact.
 
-- `infeasible_contexts` is not an accuracy measure. It means the bounded
-  search produced no feasible complete plan under the supplied inputs.
-- Increasing `top_k` does not make the search more exact. The frontier must
-  also be wide enough to retain that many useful alternatives.
-- A wider beam cannot recover a destination that was never proposed.
-- A larger proposal list can be slower without helping if the continuation
-  ranking is wrong.
-- Repeated anchors are one shared destination choice, not independent visits.
-- `Mass@K` in the quality harness is normalized over the exact reference
-  support stated by that harness. It is not automatically mass over the full
-  feasible distribution.
-- An oracle state-limit failure is "not proved", not a bounded-search hit or
-  miss.
-- `pricing_*` controls plan improvement work. Monetary cost is read from the
-  OD table, while destination shadow prices are read from destination inputs.
+With `skip_contexts_without_plan=True`, a context for which bounded search
+constructs no complete feasible plan is omitted and counted in
+`report["contexts_without_plan"]`. This is deliberately not called
+"infeasible": bounded search has not proved that no feasible plan exists.
+With the option left at `False`, the error message states the same limitation.
+
+## Changing search breadth
+
+The advanced controls affect different loss stages:
+
+- `proposal_limit_per_source` controls which destinations enter the search.
+- `frontier_width` controls which partial plans remain after they enter.
+- continuation controls influence how an unfinished plan is ranked.
+
+A wider frontier cannot recover a destination that was never proposed. A
+larger proposal list can add work without helping when continuation ranking is
+the problem. Diagnose the loss stage before changing a width.
+
+The historical `pricing_*` option and report names control complete-plan
+improvement, not money. Monetary cost comes from the OD table; actual
+destination shadow prices come from destination inputs. These advanced names
+remain only for compatibility with recorded experiments.
+
+## Reading quality experiments
+
+`Mass@K` is the probability mass of the exact top-K reference plans recovered
+by bounded search, normalized within that stated exact reference. It is not
+mass over the full feasible distribution unless a harness explicitly says so.
+An oracle `proof incomplete` case is excluded and reported separately; it is
+never counted as a bounded-search hit or miss.
 
 ## Debug one context
 

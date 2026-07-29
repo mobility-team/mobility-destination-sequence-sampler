@@ -33,6 +33,8 @@ def test_shared_experiment_defaults_match_the_live_top_k_signature() -> None:
     assert "continuation_log_gap" not in parameters
     assert "heuristic_reserve_limit" not in parameters
     assert "surface_bins" not in parameters
+    assert "skip_contexts_without_plan" in parameters
+    assert "skip_infeasible" not in parameters
     assert not hasattr(DestinationPlanSearch, "exact_distribution")
 
 
@@ -63,6 +65,8 @@ def test_two_step_top_k_matches_the_exact_oracle() -> None:
 
     assert plans(bounded) == plans(exact)
     assert oracle_report["incumbent_plans_seeded"] == 0
+    assert report["top_k_is_proven"] is False
+    assert oracle_report["top_k_is_proven"] is True
     assert report["complete_plan_candidates"] == 2
     assert report["forward_proposals_evaluated"] == 2
     assert report["stitch_pairs"] == 0
@@ -282,18 +286,28 @@ def test_bidirectional_top_k_stitches_complete_plan() -> None:
         od_costs=od_costs,
         destination_inputs=destination_inputs.filter(pl.col("activity_id") != 20),
     )
-    with pytest.raises(ValueError, match="no feasible destination sequence"):
-        missing_activity_search.top_k(
-            steps=steps,
-            initial_locations=pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
-            logit_scale=1.0,
-            update_plan_timings=True,
-            use_shadow_prices=False,
-            exploration_seed=13,
-            frontier_width=8,
-            proposal_limit_per_source=2,
-            top_k=9,
-        )
+    missing_activity_call = {
+        "steps": steps,
+        "initial_locations": pl.DataFrame({"context_id": [1], "initial_zone": [0]}),
+        "logit_scale": 1.0,
+        "update_plan_timings": True,
+        "use_shadow_prices": False,
+        "exploration_seed": 13,
+        "frontier_width": 8,
+        "proposal_limit_per_source": 2,
+        "top_k": 9,
+    }
+    with pytest.raises(
+        ValueError,
+        match="bounded search found.*does not prove the context is infeasible",
+    ):
+        missing_activity_search.top_k(**missing_activity_call)
+    skipped, skipped_report = missing_activity_search.top_k(
+        **missing_activity_call,
+        skip_contexts_without_plan=True,
+    )
+    assert skipped.height == 0
+    assert skipped_report["contexts_without_plan"] == 1
 
 
 def test_bidirectional_top_k_supports_variable_anchor() -> None:
@@ -319,7 +333,7 @@ def test_bidirectional_top_k_supports_variable_anchor() -> None:
         update_plan_timings=True,
         use_shadow_prices=False,
         exploration_seed=13,
-        skip_infeasible=True,
+        skip_contexts_without_plan=True,
     )
     assert report["contexts"] == 1
     assert result.height in {0, steps.height}
@@ -619,7 +633,7 @@ def test_exact_oracle_fails_explicitly_at_its_state_budget() -> None:
         arrival_time=pl.Series([8.5, 10.5, 17.5]),
     )
 
-    with pytest.raises(ValueError, match="exceeded max_states=1"):
+    with pytest.raises(ValueError, match="proof incomplete: exceeded max_states=1"):
         search.exact_top_k(
             steps=steps,
             initial_locations=initial_locations,
