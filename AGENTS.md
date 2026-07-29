@@ -4,8 +4,8 @@
 
 Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
 `exact_top_k()` oracle. Retired paths are preserved by the Git tag
-`research-archive-2026-07-21`; inspect one with
-`git show research-archive-2026-07-21:<path>`. Do not restore archived source
+`research-archive-2026-07-29`; inspect one with
+`git show research-archive-2026-07-29:<path>`. Do not restore archived source
 without a new, testable hypothesis.
 
 ## Commands

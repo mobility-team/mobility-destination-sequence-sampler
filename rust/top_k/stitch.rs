@@ -162,17 +162,7 @@ pub(super) fn search_context(
         }
     }
     home_bounded_depth = home_bounded_depth.max(context.steps.len() - tour_start);
-    let anchor_slots = anchor_slots(context);
-    let mut anchor_counts = vec![0_u32; anchor_slots.len()];
-    for step in &context.steps {
-        if let Some(anchor) = step.anchor_id {
-            anchor_counts[anchor_slots[&anchor]] += 1;
-        }
-    }
-    let repeated_anchor_slots = anchor_counts
-        .into_iter()
-        .map(|count| count > 1)
-        .collect::<Vec<_>>();
+    let anchor_layout = AnchorLayout::build(context);
     // Partial symmetric messages are most valuable when an unresolved choice
     // has a non-local equality constraint or another unresolved choice beside
     // it. Fixed destinations make single-variable runs locally observable by
@@ -191,9 +181,7 @@ pub(super) fn search_context(
     longest_variable_run = longest_variable_run.max(variable_run);
     let options = if options.candidate_strategy == CandidateStrategy::AdaptiveFactorMap {
         TopKOptions {
-            candidate_strategy: if repeated_anchor_slots.iter().any(|&repeated| repeated)
-                || longest_variable_run > 1
-            {
+            candidate_strategy: if anchor_layout.has_repeated() || longest_variable_run > 1 {
                 CandidateStrategy::SymmetricFactorMap
             } else {
                 CandidateStrategy::FactorMap
@@ -231,8 +219,7 @@ pub(super) fn search_context(
         parameters,
         options,
         prepared_factor_scorers,
-        anchor_slots,
-        repeated_anchor_slots,
+        anchor_layout,
     };
     let active_trace = inputs
         .options
@@ -365,7 +352,7 @@ pub(super) fn search_context(
         if !seen.insert(zones.clone()) {
             continue;
         }
-        ranked_plans.push(RankedZones {
+        ranked_plans.push(RankedPlan {
             score: completed.score,
             zones,
         });
@@ -376,7 +363,7 @@ pub(super) fn search_context(
     if let Some(started) = reconstruction_started {
         scratch.report.materialize_ns += started.elapsed().as_nanos() as u64;
     }
-    let ranked_plans = price_complete_plans(
+    let ranked_plans = improve_complete_plans(
         &inputs,
         &mut scratch.report,
         &mut scratch.factor_map_cache,

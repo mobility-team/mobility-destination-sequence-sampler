@@ -4,7 +4,7 @@ use pyo3::types::{PyAny, PyDict, PyTuple};
 use crate::errors::SamplerError;
 use crate::input::{parse_destination_inputs, parse_od_costs, parse_reference_contexts};
 use crate::model::{DestinationIndex, OdGraph};
-use crate::oracle::{enumerate_reference_distribution, search_reference_top_k, HeapSearchReport};
+use crate::oracle::{search_reference_top_k, HeapSearchReport};
 use crate::output::to_polars_dataframe;
 use crate::scoring::Parameters;
 use crate::top_k::{
@@ -40,7 +40,11 @@ impl DestinationPlanSearch {
         })
     }
 
-    /// Return the bounded, exact-score-ranked destination plans.
+    /// Return the best destination plans found by the fast bounded search.
+    ///
+    /// Every returned plan receives its full model utility, but shortlisting
+    /// and partial-plan pruning can omit a globally better plan. Most callers
+    /// should keep the search-tuning defaults unchanged.
     #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_proposal_limit=1, seam_refresh_per_prefix=1, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
@@ -174,7 +178,10 @@ impl DestinationPlanSearch {
         .into())
     }
 
-    /// Prove the highest-utility complete plans on a bounded exact workload.
+    /// Prove the highest-utility complete plans or stop at `max_states`.
+    ///
+    /// This is a validation oracle for small samples, not a production
+    /// fallback when `top_k` misses a plan.
     #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, top_k=10, max_states=2_000_000, n_threads=None, skip_infeasible=false, use_bounded_incumbent=true))]
     #[allow(clippy::too_many_arguments)]
     fn exact_top_k(
@@ -242,67 +249,6 @@ impl DestinationPlanSearch {
             ],
         )?
         .into())
-    }
-
-    /// Enumerate the full exact exp(U) distribution for one small context.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, max_assignments=100_000))]
-    #[allow(clippy::too_many_arguments)]
-    fn exact_distribution(
-        &self,
-        py: Python<'_>,
-        steps: &Bound<'_, PyAny>,
-        initial_locations: &Bound<'_, PyAny>,
-        logit_scale: f64,
-        update_plan_timings: bool,
-        use_shadow_prices: bool,
-        max_assignments: usize,
-    ) -> PyResult<PyObject> {
-        validate_logit_scale(logit_scale)?;
-        if max_assignments == 0 {
-            return Err(
-                SamplerError::InvalidInput("max_assignments must be positive".to_string()).into(),
-            );
-        }
-        let contexts = parse_reference_contexts(steps, initial_locations)?;
-        if contexts.len() != 1 {
-            return Err(SamplerError::InvalidInput(
-                "exact_distribution accepts exactly one context".to_string(),
-            )
-            .into());
-        }
-        let parameters = Parameters {
-            logit_scale,
-            update_plan_timings,
-            use_shadow_prices,
-            skip_infeasible: false,
-        };
-        let distribution = py.allow_threads(|| {
-            enumerate_reference_distribution(
-                &self.graph,
-                &self.destination_index,
-                &contexts[0],
-                parameters,
-                max_assignments,
-            )
-        })?;
-        let maximum = distribution.scores[0];
-        let log_normalizer = maximum
-            + distribution
-                .scores
-                .iter()
-                .map(|score| (score - maximum).exp())
-                .sum::<f64>()
-                .ln();
-        let feasible_plans = distribution.scores.len();
-        let result = PyDict::new(py);
-        result.set_item("scores", distribution.scores)?;
-        result.set_item("feasible_plans", feasible_plans)?;
-        result.set_item(
-            "assignment_lattice",
-            distribution.assignment_lattice.to_string(),
-        )?;
-        result.set_item("log_normalizer", log_normalizer)?;
-        Ok(result.into())
     }
 }
 

@@ -107,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trace-context",
         type=int,
-        help="inspect candidate-pool coverage for one known context ID",
+        help="show where exact target plans enter or leave the active bounded search",
     )
     parser.add_argument(
         "--design-manifest",
@@ -551,8 +551,6 @@ def bounded_failure_metrics(
             oracle, {zones for zones, _ in oracle_top_k}
         ),
         "top_k_mass_efficiency": 0.0,
-        "missed_base_pool_mass": 0.0,
-        "missed_beam_mass": 0.0,
     }
 
 
@@ -564,116 +562,6 @@ def oracle_failure_kind(error: ValueError) -> str:
     if "no feasible destination sequence" in message:
         return "infeasible"
     return "oracle_error"
-
-
-def stitch_layer_index(step_count: int, stitch_bias: int) -> int:
-    """Return the bounded stitch layer used by the Rust kernel."""
-    return max(0, min(step_count - 2, (step_count - 1) // 2 + stitch_bias))
-
-
-def base_candidate_sources(
-    od_costs: pl.DataFrame,
-    destination_inputs: pl.DataFrame,
-    activity_id: int,
-    reference_zone: int,
-    reverse: bool,
-    candidate_count: int,
-) -> tuple[set[int], set[int]]:
-    """Mirror the deterministic 16 attractive + 16 OD-cost candidate pools."""
-    activity_values = (
-        destination_inputs.filter(
-            (pl.col("activity_id") == activity_id)
-            & (pl.col("opportunity_capacity") > 0)
-        )
-        .with_columns(
-            proposal_attraction=pl.col("opportunity_capacity").log()
-            + pl.col("shadow_price")
-        )
-    )
-    attractive = set(
-        activity_values.sort(
-            ["proposal_attraction", "destination"], descending=[True, False]
-        )
-        .head(candidate_count)["destination"]
-        .to_list()
-    )
-    if reverse:
-        nearby = (
-            od_costs.filter(pl.col("destination") == reference_zone)
-            .sort(["cost", "origin"])
-            .head(candidate_count)
-            .rename({"origin": "candidate"})
-            .join(
-                activity_values.select(pl.col("destination").alias("candidate")),
-                on="candidate",
-                how="inner",
-            )
-            .select("candidate")
-        )
-    else:
-        nearby = (
-            od_costs.filter(pl.col("origin") == reference_zone)
-            .sort(["cost", "destination"])
-            .head(candidate_count)
-            .join(activity_values.select("destination"), on="destination", how="inner")
-            .select("destination")
-        )
-    return attractive, set(nearby.to_series().to_list())
-
-
-def trace_oracle_candidate_coverage(
-    context_steps: pl.DataFrame,
-    initial_zone: int,
-    oracle: list[tuple[tuple[int, ...], float]],
-    od_costs: pl.DataFrame,
-    destination_inputs: pl.DataFrame,
-    candidate_count: int,
-    top_k: int,
-    stitch_bias: int,
-) -> None:
-    """Show legacy heuristic coverage; this is not active factor-map support."""
-    steps = context_steps.sort("layer").to_dicts()
-    stitch_layer = stitch_layer_index(len(steps), stitch_bias)
-    print(
-        f"legacy heuristic trace (not active factor-map support): "
-        f"stitch-layer={stitch_layer}, pool={candidate_count}+{candidate_count}"
-    )
-    for rank, (zones, _) in enumerate(oracle[:top_k], start=1):
-        missing_base_pool = False
-        print(f"  exact rank={rank} zones={zones}")
-        for layer, (step, target) in enumerate(zip(steps, zones, strict=True)):
-            if step["fixed_destination"] is not None:
-                print(f"    layer={layer}: fixed destination {target}")
-                continue
-            reverse = stitch_layer < layer < len(steps) - 1
-            reference = zones[layer + 1] if reverse else (
-                initial_zone if layer == 0 else zones[layer - 1]
-            )
-            attractive, nearby = base_candidate_sources(
-                od_costs,
-                destination_inputs,
-                step["activity_id"],
-                reference,
-                reverse,
-                candidate_count,
-            )
-            sources = []
-            if target in attractive:
-                sources.append("attractive")
-            if target in nearby:
-                sources.append("cost-near")
-            if not sources:
-                missing_base_pool = True
-                sources.append("outside-legacy-pool")
-            direction = "backward" if reverse else "forward"
-            print(
-                f"    layer={layer} {direction} reference={reference} target={target}: "
-                f"{', '.join(sources)}"
-            )
-        if missing_base_pool:
-            print("    legacy diagnosis: outside heuristic pool; active loss stage unknown")
-        else:
-            print("    legacy diagnosis: heuristic-supported; active loss stage unknown")
 
 
 def trace_active_stage_coverage(report: dict[str, object]) -> None:
@@ -799,50 +687,12 @@ def trace_first_layer_and_plan_components(
         )
 
 
-def is_base_supported(
-    context_steps: pl.DataFrame,
-    initial_zone: int,
-    zones: tuple[int, ...],
-    od_costs: pl.DataFrame,
-    destination_inputs: pl.DataFrame,
-    candidate_count: int,
-    stitch_bias: int,
-) -> bool:
-    """Whether a complete plan is reachable without either exploration draw."""
-    steps = context_steps.sort("layer").to_dicts()
-    stitch_layer = stitch_layer_index(len(steps), stitch_bias)
-    for layer, (step, target) in enumerate(zip(steps, zones, strict=True)):
-        if step["fixed_destination"] is not None:
-            continue
-        reverse = stitch_layer < layer < len(steps) - 1
-        reference = zones[layer + 1] if reverse else (
-            initial_zone if layer == 0 else zones[layer - 1]
-        )
-        attractive, nearby = base_candidate_sources(
-            od_costs,
-            destination_inputs,
-            step["activity_id"],
-            reference,
-            reverse,
-            candidate_count,
-        )
-        if target not in attractive and target not in nearby:
-            return False
-    return True
-
-
 def show_context(
     context_id: int,
     oracle: list[tuple[tuple[int, ...], float]],
     bounded: list[tuple[tuple[int, ...], float]],
     top_k: int,
     states_pushed: int,
-    context_steps: pl.DataFrame,
-    initial_zone: int,
-    od_costs: pl.DataFrame,
-    destination_inputs: pl.DataFrame,
-    candidate_count: int,
-    stitch_bias: int,
     verbose: bool,
 ) -> dict[str, float]:
     oracle_top_k = oracle[:top_k]
@@ -853,31 +703,10 @@ def show_context(
     retained_top_k_mass = retained_probability_mass(oracle_top_k, bounded_zones)
     retained_oracle_mass = retained_probability_mass(oracle, bounded_zones)
     top_k_oracle_mass = retained_probability_mass(oracle, {zones for zones, _ in oracle_top_k})
-    missed_base_pool_mass = 0.0
-    missed_beam_mass = 0.0
-    missed_diagnoses: dict[tuple[int, ...], str] = {}
     maximum_utility = max(score for _, score in oracle_top_k)
     top_k_normalizer = sum(
         math.exp(score - maximum_utility) for _, score in oracle_top_k
     )
-    for zones, score in oracle_top_k:
-        if zones in bounded_zones:
-            continue
-        probability = math.exp(score - maximum_utility) / top_k_normalizer
-        if is_base_supported(
-            context_steps,
-            initial_zone,
-            zones,
-            od_costs,
-            destination_inputs,
-            candidate_count,
-            stitch_bias,
-        ):
-            missed_beam_mass += probability
-            missed_diagnoses[zones] = "inside-legacy-pool; active stage unknown"
-        else:
-            missed_base_pool_mass += probability
-            missed_diagnoses[zones] = "outside-legacy-pool; active stage unknown"
     if verbose:
         print(
             f"context={context_id} oracle-top-k={len(oracle_top_k)} "
@@ -900,7 +729,7 @@ def show_context(
         print("  exact top-K probability diagnosis")
         for rank, (zones, score) in enumerate(oracle_top_k, start=1):
             probability = math.exp(score - maximum_utility) / top_k_normalizer
-            status = "returned" if zones in bounded_zones else missed_diagnoses[zones]
+            status = "returned" if zones in bounded_zones else "missed"
             print(
                 f"    exact rank={rank:2d} probability={probability:.4f} "
                 f"{status:>25} zones={zones}"
@@ -911,8 +740,6 @@ def show_context(
         "retained_oracle_mass": retained_oracle_mass,
         "top_k_oracle_mass": top_k_oracle_mass,
         "top_k_mass_efficiency": retained_oracle_mass / top_k_oracle_mass,
-        "missed_base_pool_mass": missed_base_pool_mass,
-        "missed_beam_mass": missed_beam_mass,
     }
 
 
@@ -956,8 +783,6 @@ def compare_seed(
             "retained_oracle_mass": [],
             "top_k_oracle_mass": [],
             "top_k_mass_efficiency": [],
-            "missed_base_pool_mass": [],
-            "missed_beam_mass": [],
         }
         for top_k in top_ks
     }
@@ -1069,16 +894,6 @@ def compare_seed(
         if audit_mode:
             audit_outcomes[audit_stratum]["oracle_completed"] += 1
         if args.trace_context == context_id:
-            trace_oracle_candidate_coverage(
-                context_steps,
-                int(context_initial.item(0, "initial_zone")),
-                oracle,
-                od_costs,
-                destination_inputs,
-                args.proposal_limit_per_source,
-                max(top_ks),
-                args.stitch_bias,
-            )
             trace_first_layer_and_plan_components(
                 context_steps,
                 int(context_initial.item(0, "initial_zone")),
@@ -1133,12 +948,6 @@ def compare_seed(
                 ranked_plans(bounded_table),
                 top_k,
                 oracle_report["states_pushed"],
-                context_steps,
-                int(context_initial.item(0, "initial_zone")),
-                od_costs,
-                destination_inputs,
-                args.proposal_limit_per_source,
-                args.stitch_bias,
                 args.verbose or args.trace_context is not None,
             )
         if len(context_metrics) != len(top_ks):
@@ -1311,8 +1120,8 @@ def compare_seed(
         f"exact={exact_search_seconds / max(oracle_cache_misses, 1) * 1e3:.2f}ms/context "
         f"oracle-cache={oracle_cache_hits} hit/{oracle_cache_misses} miss"
     )
-    print("Search performance and miss diagnosis")
-    print("  K | recall | bounded ms | speedup | missed outside/inside legacy pool")
+    print("Search performance")
+    print("  K | recall | bounded ms | speedup")
     for top_k in top_ks:
         metrics = metrics_by_top_k[top_k]
         mean = lambda values: sum(values) / proven
@@ -1325,8 +1134,7 @@ def compare_seed(
 
         print(
             f"{top_k:3d} | {mean(metrics['recall']):.3f}  | {bounded_ms:.2f}       "
-            f"| {speedup:<7} "
-            f"| {mean(metrics['missed_base_pool_mass']):.3f}/{mean(metrics['missed_beam_mass']):.3f}"
+            f"| {speedup:<7}"
         )
     print_distribution_table(
         "Retained exact top-K mass (conditional)",

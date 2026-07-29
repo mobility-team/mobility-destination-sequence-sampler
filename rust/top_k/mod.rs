@@ -1,10 +1,9 @@
-//! Bounded bidirectional top-K search.
+//! Fast bounded destination-sequence search.
 //!
-//! This is intentionally a bounded stitch-layer beam search, not the previous all-zone
-//! bidirectional DP. It uses bounded candidate lists and beam frontiers in
-//! both directions, scores every locally complete rigidity-aware factor on its
-//! owning front, and scores only the two factors crossing the stitch boundary when
-//! stitching.
+//! The search shortlists destinations, grows partial plans from both ends,
+//! joins them near the middle, and fully scores every returned plan. Child
+//! modules own one phase each; shared state and invariants live here. See
+//! `MODELLER_GUIDE.md` for the plain-language model.
 
 use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -26,7 +25,7 @@ mod backward;
 mod candidates;
 mod factor_maps;
 mod forward;
-mod pricing;
+mod improvement;
 mod refresh;
 mod stitch;
 
@@ -39,7 +38,7 @@ use factor_maps::{
     FactorMapRequest, ReverseFactorMapRequest,
 };
 use forward::forward_beam;
-use pricing::{price_complete_plans, RankedZones};
+use improvement::{improve_complete_plans, RankedPlan};
 use refresh::refresh_stitch_frontier;
 pub use stitch::search_top_k_all;
 
@@ -267,15 +266,58 @@ impl LocalScoreCache {
     }
 }
 
-fn anchor_slots(context: &Context) -> HashMap<u32, usize> {
-    let mut slots = HashMap::new();
-    for step in &context.steps {
-        if let Some(anchor_id) = step.anchor_id {
-            let next_slot = slots.len();
-            slots.entry(anchor_id).or_insert(next_slot);
+/// Compact anchor bookkeeping prepared once for a context.
+///
+/// Search passes operate on sequence positions, so they should not repeatedly
+/// hash the transport-model `anchor_id`. Each step instead gets an optional
+/// compact slot into the anchor assignment vectors carried by search states.
+struct AnchorLayout {
+    step_slots: Vec<Option<usize>>,
+    repeated_slots: Vec<bool>,
+}
+
+impl AnchorLayout {
+    fn build(context: &Context) -> Self {
+        let mut slots_by_id = HashMap::new();
+        let mut step_slots = Vec::with_capacity(context.steps.len());
+        let mut counts = Vec::<u32>::new();
+        for step in &context.steps {
+            let slot = step.anchor_id.map(|anchor_id| {
+                let next_slot = slots_by_id.len();
+                let slot = *slots_by_id.entry(anchor_id).or_insert(next_slot);
+                if slot == counts.len() {
+                    counts.push(0);
+                }
+                counts[slot] += 1;
+                slot
+            });
+            step_slots.push(slot);
+        }
+        Self {
+            step_slots,
+            repeated_slots: counts.into_iter().map(|count| count > 1).collect(),
         }
     }
-    slots
+
+    fn len(&self) -> usize {
+        self.repeated_slots.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.repeated_slots.is_empty()
+    }
+
+    fn slot(&self, layer: usize) -> Option<usize> {
+        self.step_slots[layer]
+    }
+
+    fn repeats(&self, slot: usize) -> bool {
+        self.repeated_slots[slot]
+    }
+
+    fn has_repeated(&self) -> bool {
+        self.repeated_slots.iter().any(|&repeated| repeated)
+    }
 }
 
 fn anchors_compatible(left: &[Option<usize>], right: &[Option<usize>]) -> bool {
@@ -412,12 +454,12 @@ pub struct TopKOptions {
     pub deep_continuation_state_limit: usize,
     pub continuation_proposal_limit: usize,
     pub seam_refresh_per_prefix: usize,
-    /// Iterative exact single-variable pricing rounds over completed paths.
-    /// Zero leaves the production search unchanged.
+    /// Exact single-choice improvement rounds over complete plans.
+    /// Zero disables this phase.
     pub pricing_passes: usize,
-    /// Completed paths retained between pricing rounds.
+    /// Complete plans retained between improvement rounds.
     pub pricing_seed_limit: usize,
-    /// Best new paths retained from each priced variable neighborhood.
+    /// Best new plans retained from each single-choice neighborhood.
     pub pricing_column_limit: usize,
     /// Best exact conditional replacements crossed for each interacting pair.
     /// Zero disables the experimental two-variable neighborhood.
@@ -426,10 +468,10 @@ pub struct TopKOptions {
     pub pricing_pair_deep_candidate_limit: usize,
     /// Zero enables local probe-and-expand; positive values retain a depth comparator.
     pub pricing_pair_deep_min_layers: usize,
-    /// Require this many newly priced paths to survive before another round.
-    /// Zero runs every requested pricing pass.
+    /// Require this many newly improved plans to survive before another round.
+    /// Zero runs every requested improvement round.
     pub pricing_next_pass_min_new: usize,
-    /// Do not price contexts shallower than this many destination layers.
+    /// Do not improve contexts shallower than this many destination layers.
     pub pricing_min_layers: usize,
     pub profile: bool,
     pub active_trace: Option<ActiveTraceRequest>,
@@ -637,8 +679,7 @@ struct SearchInputs<'a> {
     parameters: Parameters,
     options: TopKOptions,
     prepared_factor_scorers: Vec<PreparedLocalScorer<'a>>,
-    anchor_slots: HashMap<u32, usize>,
-    repeated_anchor_slots: Vec<bool>,
+    anchor_layout: AnchorLayout,
 }
 
 impl SearchInputs<'_> {

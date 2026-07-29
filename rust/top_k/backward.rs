@@ -10,7 +10,7 @@ pub(super) fn backward_beam(
     let context = inputs.context;
     let beam_width = inputs.options.frontier_width;
     let candidate_count = inputs.options.proposal_limit_per_source;
-    let anchor_slots = &inputs.anchor_slots;
+    let anchor_layout = &inputs.anchor_layout;
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let factor_map_cache = &mut scratch.factor_map_cache;
@@ -38,7 +38,7 @@ pub(super) fn backward_beam(
         next: None,
         zone: graph.zone_index[&terminal_zone],
         exact_log_weight: 0.0,
-        anchors: vec![None; anchor_slots.len()],
+        anchors: vec![None; anchor_layout.len()],
     }];
     let mut frontier = vec![0];
     let terminal_layer = context.steps.len() - 1;
@@ -59,9 +59,7 @@ pub(super) fn backward_beam(
                 reference_zone: next_zone,
                 reverse: true,
                 state_index,
-                anchor_slot: context.steps[layer]
-                    .anchor_id
-                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
+                anchor_slot: anchor_layout.slot(layer),
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| nodes[index].zone);
@@ -144,8 +142,8 @@ pub(super) fn backward_beam(
                 let (next_index, destination, exact_increment) = children[index];
                 let node_index = nodes.len();
                 let mut anchors = nodes[next_index].anchors.clone();
-                if let Some(anchor) = context.steps[layer].anchor_id {
-                    anchors[anchor_slots[&anchor]] = Some(destination);
+                if let Some(slot) = anchor_layout.slot(layer) {
+                    anchors[slot] = Some(destination);
                 }
                 nodes.push(SuffixNode {
                     next: Some(next_index),
@@ -166,7 +164,7 @@ pub(super) fn backward_beam(
         frontiers,
         guidance_frontiers: vec![Vec::new(); context.steps.len()],
         partial_frontiers: vec![Vec::new(); context.steps.len()],
-        partial_anchor_candidates: vec![Vec::new(); anchor_slots.len()],
+        partial_anchor_candidates: vec![Vec::new(); anchor_layout.len()],
     })
 }
 
@@ -193,7 +191,7 @@ pub(super) fn extend_backward_guidance(
         BackwardGuidanceMode::Exact => continuation_state_limit,
     };
     let candidate_count = inputs.options.proposal_limit_per_source;
-    let anchor_slots = &inputs.anchor_slots;
+    let anchor_layout = &inputs.anchor_layout;
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let factor_map_cache = &mut scratch.factor_map_cache;
@@ -243,9 +241,7 @@ pub(super) fn extend_backward_guidance(
                 reference_zone: next_zone,
                 reverse: true,
                 state_index,
-                anchor_slot: context.steps[layer]
-                    .anchor_id
-                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
+                anchor_slot: anchor_layout.slot(layer),
                 anchors: &next.anchors,
             };
             let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
@@ -326,9 +322,8 @@ pub(super) fn extend_backward_guidance(
             }
         }
         if mode == BackwardGuidanceMode::Partial {
-            if let Some(anchor) = context.steps[layer].anchor_id {
-                let slot = anchor_slots[&anchor];
-                if inputs.repeated_anchor_slots[slot]
+            if let Some(slot) = anchor_layout.slot(layer) {
+                if anchor_layout.repeats(slot)
                     && inputs.options.symmetric_forward_proposal_limit > 0
                 {
                     let compact = &mut messages.partial_anchor_candidates[slot];
@@ -366,8 +361,8 @@ pub(super) fn extend_backward_guidance(
                 let (next_index, destination, exact_increment) = children[index];
                 let node_index = messages.nodes.len();
                 let mut anchors = messages.nodes[next_index].anchors.clone();
-                if let Some(anchor) = context.steps[layer].anchor_id {
-                    anchors[anchor_slots[&anchor]] = Some(destination);
+                if let Some(slot) = anchor_layout.slot(layer) {
+                    anchors[slot] = Some(destination);
                 }
                 messages.nodes.push(SuffixNode {
                     next: Some(next_index),

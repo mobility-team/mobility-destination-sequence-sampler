@@ -2,7 +2,8 @@
 
 Read this before changing bounded search. It is the small working model for
 the active kernel; `DESIGN.md` remains the contract and `BENCHMARKS.md` remains
-the measured decision record.
+the measured decision record. Transport-modelling terms and a worked example
+are in `MODELLER_GUIDE.md`.
 
 ## What is active
 
@@ -18,7 +19,7 @@ repeats. When fixed destinations isolate every variable and no anchor repeats,
 it skips the partial reverse channel and uses ordinary exact factor maps.
 Each layer's immutable destination table, first-choice status, terminal state,
 and adjacent step are compiled once per context and reused by factor-map,
-reverse-prefix, and pricing scans. This changes implementation cost only:
+reverse-prefix, and complete-plan improvement scans. This changes implementation cost only:
 feasibility, `f64` arithmetic, factor ownership, and final exact rescoring are
 unchanged.
 Factor maps apply when every home-bounded tour is at most
@@ -26,12 +27,13 @@ Factor maps apply when every home-bounded tour is at most
 heuristic proposal pool with two exact continuation states. Fixed home returns
 remain part of the full scorer and do not make tours independently solvable. A
 two-step context is a direct exact scan. After stitching, contexts with at
-least six layers price exact single-variable replacements from the best
-complete plans. At most two rounds run; the second requires at least three new
-surviving plans from the first. Each round also crosses exact conditional
-columns for interacting variable pairs. Every pair probes four candidates per
-variable, then expands to eight only when the best probe candidate improves
-the current working Kth score by more than 0.2.
+least six layers run complete-plan improvement (called `pricing_*` in the
+public API for compatibility). It tries exact single-variable replacements
+from the best complete plans. At most two rounds run; the second requires at
+least three new surviving plans from the first. Each round also crosses exact
+conditional replacements for interacting variable pairs. Every pair probes
+four candidates per variable, then expands to eight only when the best probe
+candidate improves the current working Kth score by more than 0.2.
 
 ## One-context flow
 
@@ -45,7 +47,7 @@ Python tables
   -> forward beam and proposal support
   -> optional forward-to-backward seam refresh
   -> exact boundary stitch and deduplicate
-  -> locally routed exact path pricing
+  -> locally routed exact complete-plan improvement
   -> materialize
 ```
 
@@ -55,7 +57,7 @@ all caches and mutable search state are per context.
 
 `rust/top_k/mod.rs` owns shared private state; its explicit child modules own
 one search phase each (`factor_maps`, `backward`, `forward`, `refresh`, and
-`stitch`); `pricing` owns the post-stitch completed-path pass. Keep cross-phase
+`stitch`); `improvement` owns the post-stitch completed-path pass. Keep cross-phase
 interfaces `pub(super)` and narrow: a phase must not reach into another phase's
 cache implementation directly.
 
@@ -84,17 +86,18 @@ reverse proposal passes. A fixed home destination is therefore a map boundary,
 not a legacy-candidate fallback; its crossing local factor remains owned and
 scored exactly by the relevant beam.
 
-Post-stitch pricing reuses ranked exact factor maps for unanchored layers. A
-repeated anchor is replaced as one group and all affected factors are scored
-with the shared scorer. Retained columns are then fully rescored, so the pass
-changes support but not factor ownership or ranking semantics.
+Post-stitch plan improvement reuses ranked exact factor maps for unanchored
+layers. A repeated anchor is replaced as one group and all affected factors
+are scored with the shared scorer. Retained alternatives are then fully
+rescored, so the pass changes support but not factor ownership or ranking
+semantics.
 
-Pair pricing considers only groups whose affected factor windows overlap. It
-scores the union of affected factors, keeps at most the working top-K from each
-joint neighborhood, and fully rescores those survivors. This can cross a
+Pair improvement considers only groups whose affected factor windows overlap.
+It scores the union of affected factors, keeps at most the working top-K from
+each joint neighborhood, and fully rescores those survivors. This can cross a
 two-variable utility valley without constructing an all-domain Cartesian
-product. The 4x4 probe uses runtime scores only; exact certificates are
-offline experiment labels and never router inputs.
+product. The 4x4 probe uses runtime scores only; exact certificates are offline
+experiment labels and never router inputs.
 
 ## Read only what the task needs
 
@@ -105,7 +108,7 @@ offline experiment labels and never router inputs.
 | Proposal-support experiment | `rust/top_k/factor_maps.rs`, `rust/top_k/forward.rs`, `rust/top_k/candidates.rs` | oracle internals |
 | Reverse/symmetric guidance | `rust/top_k/backward.rs` | forward ranking details |
 | Stitch or anchor invariant | `rust/top_k/stitch.rs`, `DESIGN.md` | factor-map construction |
-| Complete-path pricing/routing | `rust/top_k/pricing.rs`, `rust/top_k/factor_maps.rs`, `rust/top_k/stitch.rs` | oracle internals |
+| Complete-plan improvement | `rust/top_k/improvement.rs`, `rust/top_k/factor_maps.rs`, `rust/top_k/stitch.rs` | oracle internals |
 | Exactness/oracle issue | `rust/oracle.rs`, `experiments/benchmarks/exact-reference.md` | bounded passes |
 | Quality or throughput measurement | `experiments/measurement-guide.md`, then the named harness | retired-tag source |
 
@@ -134,14 +137,14 @@ cost on every search object despite having no active consumer.
 | `continuation_proposal_limit` | 1 | all | reverse-projection proposals per guidance state |
 | `seam_refresh_per_prefix` | 1 | all | extra suffix states from retained prefixes; never replaces reverse states |
 | `stitch_bias` | 1 | contexts with 3+ steps | shifts the balanced stitch layer |
-| `pricing_passes` | 2 | contexts with at least `pricing_min_layers` | maximum completed-path pricing rounds; zero disables |
-| `pricing_seed_limit` | 10 | pricing | best complete plans used as pricing seeds |
-| `pricing_column_limit` | 4 | pricing | exact replacement columns retained per variable/group and seed |
-| `pricing_pair_candidate_limit` | 4 | pricing | exact conditional columns crossed by the local pair probe |
-| `pricing_pair_deep_candidate_limit` | 8 | pricing | wider interacting-pair budget used after local escalation |
-| `pricing_pair_deep_min_layers` | 0 | pricing | zero enables local probe-and-expand; values >=2 retain the depth-routed comparator |
-| `pricing_next_pass_min_new` | 3 | pricing | minimum first-round surviving additions required for another round |
-| `pricing_min_layers` | 6 | pricing | route pricing away from short contexts |
+| `pricing_passes` | 2 | plan improvement | maximum improvement rounds; zero disables |
+| `pricing_seed_limit` | 10 | plan improvement | best complete plans used as starting points |
+| `pricing_column_limit` | 4 | plan improvement | single-choice replacements retained per group and starting plan |
+| `pricing_pair_candidate_limit` | 4 | pair improvement | replacements per variable in the local pair probe |
+| `pricing_pair_deep_candidate_limit` | 8 | pair improvement | wider replacement budget after local escalation |
+| `pricing_pair_deep_min_layers` | 0 | pair improvement | zero enables local probe-and-expand; values >=2 retain the depth-routed comparator |
+| `pricing_next_pass_min_new` | 3 | plan improvement | first-round survivors required for another round |
+| `pricing_min_layers` | 6 | plan improvement | skip the improvement pass on shorter plans |
 | `exploration_seed` | required | all | deterministic exploration tie/support choices |
 | `top_k` | 10 | all | returned distinct plans; positive |
 
@@ -174,4 +177,4 @@ default. This changes pruning only, never the proof result; pass
    check. At a decision point run `just check` plus the agreed quality/runtime
    samples.
 4. Preserve a rejected result as a concise entry in `experiments/historical.md`;
-   older source is available with `git show research-archive-2026-07-21:<path>`.
+   older source is available with `git show research-archive-2026-07-29:<path>`.

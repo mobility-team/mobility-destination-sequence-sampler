@@ -1,10 +1,16 @@
+//! Post-search neighbourhood improvement for complete plans.
+//!
+//! Public option and report names retain the historical `pricing_*` prefix
+//! for compatibility. This is not monetary pricing: it tries exact one- and
+//! two-destination replacements around the best stitched plans.
+
 use super::*;
 use std::collections::BTreeMap;
 
 const PAIR_EXPANSION_MIN_KTH_IMPROVEMENT: f64 = 0.2;
 
 #[derive(Clone)]
-pub(super) struct RankedZones {
+pub(super) struct RankedPlan {
     pub(super) score: f64,
     pub(super) zones: Vec<usize>,
 }
@@ -101,7 +107,7 @@ fn rescore_affected(inputs: &SearchInputs<'_>, zones: &[usize], factors: &[usize
     Some(score)
 }
 
-fn rank_plans(plans: &mut Vec<RankedZones>, limit: usize) {
+fn rank_plans(plans: &mut Vec<RankedPlan>, limit: usize) {
     plans.sort_unstable_by(|left, right| {
         right
             .score
@@ -138,7 +144,7 @@ fn factor_map_columns(
             next: None,
             zone: zones[next_next_layer],
             exact_log_weight: 0.0,
-            anchors: vec![None; inputs.anchor_slots.len()],
+            anchors: vec![None; inputs.anchor_layout.len()],
         });
         0
     });
@@ -146,7 +152,7 @@ fn factor_map_columns(
         next: next_next,
         zone: zones[next_layer],
         exact_log_weight: 0.0,
-        anchors: vec![None; inputs.anchor_slots.len()],
+        anchors: vec![None; inputs.anchor_layout.len()],
     });
     let suffix_index = suffix_nodes.len() - 1;
     factor_map_candidates(
@@ -168,11 +174,11 @@ fn factor_map_columns(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn price_group_columns(
+fn replacement_columns(
     inputs: &SearchInputs<'_>,
     report: &mut TopKReport,
     group: &VariableGroup,
-    seed: &RankedZones,
+    seed: &RankedPlan,
     base_score: f64,
     local_weights: &[f64],
     candidate_limit: usize,
@@ -299,13 +305,13 @@ fn evaluate_pair_neighborhood(
     }
 }
 
-pub(super) fn price_complete_plans(
+pub(super) fn improve_complete_plans(
     inputs: &SearchInputs<'_>,
     report: &mut TopKReport,
     factor_maps: &mut FactorMapCache,
     factor_map_ranked: &mut Vec<(f64, usize)>,
-    mut current: Vec<RankedZones>,
-) -> Result<Vec<RankedZones>, SamplerError> {
+    mut current: Vec<RankedPlan>,
+) -> Result<Vec<RankedPlan>, SamplerError> {
     if inputs.options.pricing_passes == 0
         || inputs.context.steps.len() < inputs.options.pricing_min_layers
         || current.is_empty()
@@ -375,9 +381,9 @@ pub(super) fn price_complete_plans(
             .map(|plan| plan.zones.clone())
             .collect::<BTreeSet<_>>();
         let seeds = current.clone();
-        let mut priced = BTreeMap::<Vec<usize>, f64>::new();
+        let mut improved = BTreeMap::<Vec<usize>, f64>::new();
         for plan in &current {
-            priced.insert(plan.zones.clone(), plan.score);
+            improved.insert(plan.zones.clone(), plan.score);
         }
         let working_kth_score =
             (current.len() >= working_limit).then(|| current[working_limit - 1].score);
@@ -388,7 +394,7 @@ pub(super) fn price_complete_plans(
             };
             let mut columns_by_group = Vec::with_capacity(groups.len());
             for group in &groups {
-                let columns = price_group_columns(
+                let columns = replacement_columns(
                     inputs,
                     report,
                     group,
@@ -402,7 +408,7 @@ pub(super) fn price_complete_plans(
                 for column in columns.iter().take(column_limit) {
                     let mut zones = seed.zones.clone();
                     apply_group(&mut zones, group, column.destination);
-                    if priced.insert(zones, column.score).is_none() {
+                    if improved.insert(zones, column.score).is_none() {
                         report.pricing_plans_added += 1;
                     }
                 }
@@ -563,7 +569,7 @@ pub(super) fn price_complete_plans(
                         let Some((score, _)) = score_zones(inputs.scoring(), &zones) else {
                             continue;
                         };
-                        if priced.insert(zones, score).is_none() {
+                        if improved.insert(zones, score).is_none() {
                             report.pricing_plans_added += 1;
                             report.pricing_pair_plans_added += 1;
                         }
@@ -571,9 +577,9 @@ pub(super) fn price_complete_plans(
                 }
             }
         }
-        current = priced
+        current = improved
             .into_iter()
-            .map(|(zones, score)| RankedZones { score, zones })
+            .map(|(zones, score)| RankedPlan { score, zones })
             .collect();
         rank_plans(&mut current, working_limit);
         report.pricing_rounds += 1;

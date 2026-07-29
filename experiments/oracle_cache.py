@@ -35,7 +35,7 @@ _BOUNDED_INITIALIZER_SOURCES = (
     "rust/top_k/backward.rs",
     "rust/top_k/forward.rs",
     "rust/top_k/factor_maps.rs",
-    "rust/top_k/pricing.rs",
+    "rust/top_k/improvement.rs",
     "rust/top_k/refresh.rs",
     "rust/top_k/candidates.rs",
 )

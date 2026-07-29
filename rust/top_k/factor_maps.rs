@@ -103,16 +103,13 @@ pub(super) fn reverse_prefix_partial_score(
         if let Some(fixed) = inputs.context.steps[known_layer].fixed_destination {
             return inputs.graph.zone_index.get(&fixed).copied();
         }
-        inputs.context.steps[known_layer]
-            .anchor_id
-            .and_then(|anchor| inputs.anchor_slots.get(&anchor).copied())
-            .and_then(|slot| {
-                if candidate_slot == Some(slot) {
-                    Some(destination)
-                } else {
-                    anchors[slot]
-                }
-            })
+        inputs.anchor_layout.slot(known_layer).and_then(|slot| {
+            if candidate_slot == Some(slot) {
+                Some(destination)
+            } else {
+                anchors[slot]
+            }
+        })
     };
     let factor_is_exactly_scored = |factor_layer: usize| {
         known_destination(factor_layer).is_some()

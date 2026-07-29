@@ -33,6 +33,7 @@ def test_shared_experiment_defaults_match_the_live_top_k_signature() -> None:
     assert "continuation_log_gap" not in parameters
     assert "heuristic_reserve_limit" not in parameters
     assert "surface_bins" not in parameters
+    assert not hasattr(DestinationPlanSearch, "exact_distribution")
 
 
 def test_two_step_top_k_matches_the_exact_oracle() -> None:

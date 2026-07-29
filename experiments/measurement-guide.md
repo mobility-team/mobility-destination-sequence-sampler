@@ -16,7 +16,7 @@
 | Decision-grade exact quality gate | `just compare-quality-manifest <manifest>` | locked-cohort A/B quality verdict and missing-oracle interval |
 | Returned-support concentration | `just diagnose-returned-distribution` | conditional mass@10/20/50 within returned top-100 |
 | Symmetric tuning | `just sweep-symmetric` | compact comparison of message/state/proposal widths |
-| Pricing router | `just evaluate-pricing-router` | first/second-pass marginal quality and router capture |
+| Plan-improvement router | `just evaluate-pricing-router` | first/second-pass marginal quality and router capture |
 | Regression cases | `just canary-quality` | fixed difficult contexts with cached exact answers |
 
 `BENCHMARKS.md` is the active baseline. A benchmark is comparable only when it
@@ -52,13 +52,13 @@ under an attempt identity that also fingerprints the bounded initializer.
 Recall@10 and Mass@10, and materially expands deep-context certification. Use
 `audit-global-quality` when a top-100 tail support is specifically required.
 
-## Diagnostics that are deliberately not active support analysis
+## One-context diagnosis
 
-`compare_bidirectional_top_k_grand_geneve.py` can print a **legacy heuristic
-trace** and labels such as `inside-legacy-pool; active stage unknown`. These
-diagnose the retired heuristic pool only. They do not locate loss within the
-active factor-map/symmetric policy and must not be used as direct tuning
-evidence.
+Use `just explain-context <context_id>` after reproducing a miss. It compares
+the bounded result with a cached exact answer and traces each exact target
+through the active proposal, coherent-prefix, reverse-guidance, and retention
+stages. The old heuristic-pool diagnosis was removed because it could not
+locate losses in the active factor-map search.
 
 ## Discovery, validation, and immutable configurations
 

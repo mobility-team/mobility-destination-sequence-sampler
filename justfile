@@ -108,3 +108,7 @@ evaluate-pricing-router: build-release
 # Run bounded and exact calls locally, returning only a compact JSON report.
 code-mode-probe context_id='26': build-release
     @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.code_mode_probe --context-id {{context_id}}; exit $LASTEXITCODE
+
+# Explain one context with exact paths and active proposal/retention traces.
+explain-context context_id='26': build-fast
+    @mamba run -n mobility-destination-sequence-sampler python -m experiments.analysis.compare_bidirectional_top_k_grand_geneve --context-id {{context_id}} --trace-context {{context_id}} --contexts 1 --candidate-contexts 1 --top-k 10 --oracle-depth 10 --max-states 500000 --threads 1 --compact; exit $LASTEXITCODE

@@ -166,14 +166,3 @@ class DestinationPlanSearch:
         skip_infeasible: bool = False,
         use_bounded_incumbent: bool = True,
     ) -> tuple[Any, ExactTopKReport]: ...
-
-    def exact_distribution(
-        self,
-        *,
-        steps: Any,
-        initial_locations: Any,
-        logit_scale: float,
-        update_plan_timings: bool,
-        use_shadow_prices: bool,
-        max_assignments: int = 100_000,
-    ) -> dict[str, Any]: ...

@@ -12,7 +12,7 @@ pub(super) fn forward_beam(
     let parameters = inputs.parameters;
     let beam_width = inputs.options.frontier_width;
     let candidate_count = inputs.options.proposal_limit_per_source;
-    let anchor_slots = &inputs.anchor_slots;
+    let anchor_layout = &inputs.anchor_layout;
     let continuation_state_limit = if context.steps.len() > inputs.options.factor_map_max_depth {
         inputs.options.deep_continuation_state_limit
     } else {
@@ -44,7 +44,7 @@ pub(super) fn forward_beam(
         parent: None,
         zone: home,
         exact_log_weight: 0.0,
-        anchors: vec![None; anchor_slots.len()],
+        anchors: vec![None; anchor_layout.len()],
     }];
     let mut frontier = vec![0];
     for layer in 0..=stitch_layer {
@@ -54,9 +54,7 @@ pub(super) fn forward_beam(
         let mut pairs = Vec::new();
         for (state_index, &parent_index) in frontier.iter().enumerate() {
             let parent = &nodes[parent_index];
-            let candidate_slot = context.steps[layer]
-                .anchor_id
-                .and_then(|anchor| anchor_slots.get(&anchor).copied());
+            let candidate_slot = anchor_layout.slot(layer);
             let query = CandidateQuery {
                 layer,
                 reference_zone: parent.zone,
@@ -133,7 +131,7 @@ pub(super) fn forward_beam(
             };
             if symmetric && unassigned {
                 if let Some(slot) = candidate_slot {
-                    if inputs.repeated_anchor_slots[slot] {
+                    if anchor_layout.repeats(slot) {
                         candidate_zones
                             .extend_from_slice(&backward.partial_anchor_candidates[slot]);
                     }
@@ -350,8 +348,8 @@ pub(super) fn forward_beam(
                 let (parent_index, destination, exact_increment) = children[index];
                 let node_index = nodes.len();
                 let mut anchors = nodes[parent_index].anchors.clone();
-                if let Some(anchor) = context.steps[layer].anchor_id {
-                    anchors[anchor_slots[&anchor]] = Some(destination);
+                if let Some(slot) = anchor_layout.slot(layer) {
+                    anchors[slot] = Some(destination);
                 }
                 nodes.push(PrefixNode {
                     parent: Some(parent_index),

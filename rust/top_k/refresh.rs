@@ -18,7 +18,7 @@ pub(super) fn best_refresh_suffix(
     request: RefreshSuffixRequest<'_>,
     unanchored_values: &mut HashMap<usize, Option<(usize, f64, f64)>>,
 ) -> Option<(usize, f64, f64)> {
-    if inputs.anchor_slots.is_empty() {
+    if inputs.anchor_layout.is_empty() {
         if let Some(value) = unanchored_values.get(&request.candidate) {
             return *value;
         }
@@ -26,7 +26,7 @@ pub(super) fn best_refresh_suffix(
     let mut best = None;
     for &next_index in request.downstream {
         let next = &request.messages.nodes[next_index];
-        if !inputs.anchor_slots.is_empty()
+        if !inputs.anchor_layout.is_empty()
             && !candidate_anchors_compatible(
                 request.prefix_anchors,
                 &next.anchors,
@@ -50,7 +50,7 @@ pub(super) fn best_refresh_suffix(
             best = Some((next_index, local_score, suffix_score));
         }
     }
-    if inputs.anchor_slots.is_empty() {
+    if inputs.anchor_layout.is_empty() {
         unanchored_values.insert(request.candidate, best);
     }
     best
@@ -69,7 +69,7 @@ pub(super) fn refresh_stitch_frontier(
     let context = inputs.context;
     let candidate_count = inputs.options.proposal_limit_per_source;
     let refresh_per_prefix = inputs.options.seam_refresh_per_prefix;
-    let anchor_slots = &inputs.anchor_slots;
+    let anchor_layout = &inputs.anchor_layout;
     let profile = inputs.options.profile;
     let candidate_cache = &mut scratch.candidate_cache;
     let local_scores = &mut scratch.local_scores;
@@ -108,9 +108,7 @@ pub(super) fn refresh_stitch_frontier(
     let mut unanchored_suffix_values = HashMap::<usize, Option<(usize, f64, f64)>>::new();
     for (state_index, &prefix_index) in prefix_frontier.iter().enumerate() {
         let prefix = &prefix_nodes[prefix_index];
-        let candidate_slot = context.steps[refresh_layer]
-            .anchor_id
-            .and_then(|anchor| anchor_slots.get(&anchor).copied());
+        let candidate_slot = anchor_layout.slot(refresh_layer);
         let mut ranked = Vec::new();
         for candidate in candidates(
             candidate_inputs,
@@ -184,8 +182,8 @@ pub(super) fn refresh_stitch_frontier(
     for (candidate, next_index, local_score) in additions {
         let node_index = messages.nodes.len();
         let mut anchors = messages.nodes[next_index].anchors.clone();
-        if let Some(anchor) = context.steps[refresh_layer].anchor_id {
-            anchors[anchor_slots[&anchor]] = Some(candidate);
+        if let Some(slot) = anchor_layout.slot(refresh_layer) {
+            anchors[slot] = Some(candidate);
         }
         messages.nodes.push(SuffixNode {
             next: Some(next_index),

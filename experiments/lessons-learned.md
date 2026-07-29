@@ -16,4 +16,4 @@
   second-order raw-zone recursion, and hierarchical kernels are archived.
 
 Measurements live beside the relevant experiment; retired source is preserved
-by the `research-archive-2026-07-21` Git tag.
+by the `research-archive-2026-07-29` Git tag.

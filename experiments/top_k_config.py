@@ -29,108 +29,48 @@ ACTIVE_TOP_K_DEFAULTS = {
     "pricing_min_layers": 6,
 }
 
+CANDIDATE_STRATEGIES = (
+    "factor_map",
+    "symmetric_factor_map",
+    "adaptive_factor_map",
+    "heuristic",
+)
+
+_OPTION_HELP = {
+    "frontier_width": "partial plans retained at each forward/backward step",
+    "proposal_limit_per_source": "destinations proposed from each retained partial plan",
+    "symmetric_message_limit": "right-to-left lookahead states for adjacent unknowns",
+    "symmetric_state_limit": "partial right-to-left states retained away from the join",
+    "symmetric_forward_proposal_limit": "lookahead destinations offered to the forward search",
+    "candidate_strategy": "destination-shortlisting policy",
+    "factor_map_max_depth": "longest home-bounded tour using factor-map proposals",
+    "stitch_bias": "offset from the middle step where forward and backward search join",
+    "continuation_state_limit": "right-side states used to rank each forward proposal",
+    "deep_continuation_state_limit": "right-side states used on long tours",
+    "continuation_proposal_limit": "destinations projected back from each right-side state",
+    "seam_refresh_per_prefix": "extra join states proposed from each retained left side",
+    "pricing_passes": "complete-plan improvement rounds (historical public name)",
+    "pricing_seed_limit": "best complete plans improved in each round",
+    "pricing_column_limit": "single-choice replacements retained per plan",
+    "pricing_pair_candidate_limit": "replacements per choice in the pair probe",
+    "pricing_pair_deep_candidate_limit": "replacements per choice after pair expansion",
+    "pricing_pair_deep_min_layers": "0 selects local expansion; >=2 selects by plan depth",
+    "pricing_next_pass_min_new": "new surviving plans required for another improvement round",
+    "pricing_min_layers": "minimum plan length receiving post-search improvement",
+}
+
 
 def add_top_k_tuning_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add every bounded-search tuning option with active-baseline defaults."""
-    parser.add_argument("--frontier-width", type=int, default=ACTIVE_TOP_K_DEFAULTS["frontier_width"])
-    parser.add_argument(
-        "--proposal-limit-per-source",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["proposal_limit_per_source"],
-    )
-    parser.add_argument(
-        "--symmetric-message-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["symmetric_message_limit"],
-    )
-    parser.add_argument(
-        "--symmetric-state-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["symmetric_state_limit"],
-    )
-    parser.add_argument(
-        "--symmetric-forward-proposal-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["symmetric_forward_proposal_limit"],
-    )
-    parser.add_argument(
-        "--candidate-strategy",
-        choices=(
-            "factor_map",
-            "symmetric_factor_map",
-            "adaptive_factor_map",
-            "heuristic",
-        ),
-        default=ACTIVE_TOP_K_DEFAULTS["candidate_strategy"],
-        help="bounded proposal policy (default: adaptive_factor_map)",
-    )
-    parser.add_argument(
-        "--factor-map-max-depth",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["factor_map_max_depth"],
-        help="maximum home-bounded tour depth for factor-map support",
-    )
-    parser.add_argument("--stitch-bias", type=int, default=ACTIVE_TOP_K_DEFAULTS["stitch_bias"])
-    parser.add_argument(
-        "--continuation-state-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["continuation_state_limit"],
-    )
-    parser.add_argument(
-        "--deep-continuation-state-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["deep_continuation_state_limit"],
-    )
-    parser.add_argument(
-        "--continuation-proposal-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["continuation_proposal_limit"],
-    )
-    parser.add_argument(
-        "--seam-refresh-per-prefix",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["seam_refresh_per_prefix"],
-    )
-    parser.add_argument(
-        "--pricing-passes",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_passes"],
-    )
-    parser.add_argument(
-        "--pricing-seed-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_seed_limit"],
-    )
-    parser.add_argument(
-        "--pricing-column-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_column_limit"],
-    )
-    parser.add_argument(
-        "--pricing-pair-candidate-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_pair_candidate_limit"],
-    )
-    parser.add_argument(
-        "--pricing-pair-deep-candidate-limit",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_pair_deep_candidate_limit"],
-    )
-    parser.add_argument(
-        "--pricing-pair-deep-min-layers",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_pair_deep_min_layers"],
-    )
-    parser.add_argument(
-        "--pricing-next-pass-min-new",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_next_pass_min_new"],
-    )
-    parser.add_argument(
-        "--pricing-min-layers",
-        type=int,
-        default=ACTIVE_TOP_K_DEFAULTS["pricing_min_layers"],
-    )
+    """Add the advanced search controls shared by every experiment command."""
+    for name, default in ACTIVE_TOP_K_DEFAULTS.items():
+        options: dict[str, Any] = {
+            "default": default,
+            "type": type(default),
+            "help": _OPTION_HELP[name],
+        }
+        if name == "candidate_strategy":
+            options["choices"] = CANDIDATE_STRATEGIES
+        parser.add_argument(f"--{name.replace('_', '-')}", **options)
 
 
 def top_k_tuning_options(args: argparse.Namespace) -> dict[str, Any]:
