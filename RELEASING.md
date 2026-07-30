@@ -4,7 +4,7 @@
 
 These steps are required once for this repository:
 
-1. Create a protected GitHub environment named `pypi`.
+1. Create a GitHub environment named `pypi`.
 2. On PyPI, configure a pending Trusted Publisher with:
    - PyPI project name: `mobility-destination-sequence-sampler`
    - GitHub owner: `mobility-team`
