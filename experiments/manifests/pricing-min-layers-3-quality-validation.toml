@@ -1,0 +1,70 @@
+schema_version = 1
+id = "pricing-min-layers-3-quality-validation"
+kind = "quality_only"
+stage = "validation"
+hypothesis = "Pricing all contexts from depth 3 improves post-stratified Mass@10 by at least 0.002 without increasing zero-overlap cases."
+mechanism = "Exact completed-path pricing can recover missed interacting and single-variable replacements in depth 3 to 5 contexts that the current depth-6 gate excludes."
+falsifier = "Reject the change if post-stratified Mass@10 improves by less than 0.002 or the number of certified zero-overlap cases increases."
+unknowns = ["The exact oracle may leave enough validation contexts unresolved for the missingness interval to remain decision-relevant."]
+
+[comparison]
+allowed_differences = ["pricing_min_layers"]
+
+[cohort]
+name = "pricing-min-layers-3-quality-validation"
+role = "validation"
+selection_seed = 314159
+selector = "stratified"
+contexts_per_stratum = 10
+expected_fingerprint = "31dab0650b2504ed2f66"
+
+[gates]
+stratified_mass_delta_min = 0.002
+zero_mass_delta_max = 0.0
+
+[evidence]
+quality_artifact = ""
+
+[baseline.options]
+frontier_width = 40
+proposal_limit_per_source = 16
+symmetric_message_limit = 4
+symmetric_state_limit = 4
+symmetric_forward_proposal_limit = 20
+candidate_strategy = "symmetric_factor_map"
+factor_map_max_depth = 5
+stitch_bias = 1
+continuation_state_limit = 1
+deep_continuation_state_limit = 2
+continuation_proposal_limit = 1
+seam_refresh_per_prefix = 1
+pricing_passes = 2
+pricing_seed_limit = 10
+pricing_column_limit = 4
+pricing_pair_candidate_limit = 4
+pricing_pair_deep_candidate_limit = 8
+pricing_pair_deep_min_layers = 9
+pricing_next_pass_min_new = 3
+pricing_min_layers = 6
+
+[candidate.options]
+frontier_width = 40
+proposal_limit_per_source = 16
+symmetric_message_limit = 4
+symmetric_state_limit = 4
+symmetric_forward_proposal_limit = 20
+candidate_strategy = "symmetric_factor_map"
+factor_map_max_depth = 5
+stitch_bias = 1
+continuation_state_limit = 1
+deep_continuation_state_limit = 2
+continuation_proposal_limit = 1
+seam_refresh_per_prefix = 1
+pricing_passes = 2
+pricing_seed_limit = 10
+pricing_column_limit = 4
+pricing_pair_candidate_limit = 4
+pricing_pair_deep_candidate_limit = 8
+pricing_pair_deep_min_layers = 9
+pricing_next_pass_min_new = 3
+pricing_min_layers = 3

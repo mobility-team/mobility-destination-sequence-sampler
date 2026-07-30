@@ -7,7 +7,10 @@ use crate::model::{DestinationIndex, OdGraph};
 use crate::oracle::{search_reference_top_k, HeapSearchReport};
 use crate::output::to_polars_dataframe;
 use crate::scoring::Parameters;
-use crate::top_k::{search_top_k_all, CandidateStrategy, TopKOptions, TopKReport};
+use crate::top_k::{
+    search_top_k_all, ActiveTraceRequest, CandidateStrategy, TopKOptions, TopKReport,
+};
+use std::sync::Arc;
 
 /// Active deterministic destination-plan search.
 ///
@@ -37,8 +40,13 @@ impl DestinationPlanSearch {
         })
     }
 
-    /// Return the bounded, exact-score-ranked destination plans.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, candidate_strategy="factor_map", surface_bins=2, factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, continuation_proposal_limit=1, seam_refresh_per_prefix=1, top_k=10, n_threads=None, skip_infeasible=false, collect_profile=false))]
+    /// Return the best destination plans found by the fast bounded search.
+    ///
+    /// Every returned plan receives its full model utility, but shortlisting
+    /// and partial-plan pruning can omit a globally better plan. Most callers
+    /// should keep the search-tuning defaults unchanged. The report always
+    /// states `top_k_is_proven=false`.
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, exploration_seed, frontier_width=40, proposal_limit_per_source=16, symmetric_message_limit=4, symmetric_state_limit=4, symmetric_forward_proposal_limit=20, candidate_strategy="adaptive_factor_map", factor_map_max_depth=5, stitch_bias=1, continuation_state_limit=1, deep_continuation_state_limit=2, continuation_proposal_limit=1, seam_refresh_per_prefix=1, pricing_passes=2, pricing_seed_limit=10, pricing_column_limit=4, pricing_pair_candidate_limit=4, pricing_pair_deep_candidate_limit=8, pricing_pair_deep_min_layers=0, pricing_next_pass_min_new=3, pricing_min_layers=6, top_k=10, n_threads=None, skip_contexts_without_plan=false, collect_profile=false, active_trace_context_id=None, active_trace_target_plans=None))]
     #[allow(clippy::too_many_arguments)]
     fn top_k(
         &self,
@@ -51,34 +59,43 @@ impl DestinationPlanSearch {
         exploration_seed: u64,
         frontier_width: usize,
         proposal_limit_per_source: usize,
+        symmetric_message_limit: usize,
+        symmetric_state_limit: usize,
+        symmetric_forward_proposal_limit: usize,
         candidate_strategy: &str,
-        surface_bins: usize,
         factor_map_max_depth: usize,
         stitch_bias: i32,
         continuation_state_limit: usize,
+        deep_continuation_state_limit: usize,
         continuation_proposal_limit: usize,
         seam_refresh_per_prefix: usize,
+        pricing_passes: usize,
+        pricing_seed_limit: usize,
+        pricing_column_limit: usize,
+        pricing_pair_candidate_limit: usize,
+        pricing_pair_deep_candidate_limit: usize,
+        pricing_pair_deep_min_layers: usize,
+        pricing_next_pass_min_new: usize,
+        pricing_min_layers: usize,
         top_k: u32,
         n_threads: Option<usize>,
-        skip_infeasible: bool,
+        skip_contexts_without_plan: bool,
         collect_profile: bool,
+        active_trace_context_id: Option<u64>,
+        active_trace_target_plans: Option<Vec<Vec<u32>>>,
     ) -> PyResult<PyObject> {
         validate_logit_scale(logit_scale)?;
         validate_top_k(top_k as usize)?;
         if frontier_width == 0
             || proposal_limit_per_source == 0
             || continuation_state_limit == 0
+            || deep_continuation_state_limit == 0
             || continuation_proposal_limit == 0
         {
             return Err(SamplerError::InvalidInput(
-                "frontier_width, proposal_limit_per_source, continuation_state_limit, and continuation_proposal_limit must be positive".to_string(),
+                "frontier_width, proposal_limit_per_source, continuation state limits, and continuation_proposal_limit must be positive".to_string(),
             )
             .into());
-        }
-        if !matches!(surface_bins, 2 | 4) {
-            return Err(
-                SamplerError::InvalidInput("surface_bins must be 2 or 4".to_string()).into(),
-            );
         }
         if factor_map_max_depth < 2 {
             return Err(SamplerError::InvalidInput(
@@ -86,15 +103,38 @@ impl DestinationPlanSearch {
             )
             .into());
         }
+        if pricing_passes > 0
+            && (pricing_seed_limit == 0
+                || pricing_column_limit == 0
+                || pricing_min_layers < 2
+                || (pricing_pair_deep_candidate_limit > 0 && pricing_pair_deep_min_layers == 1))
+        {
+            return Err(SamplerError::InvalidInput(
+                "pricing seed/column limits must be positive; pricing_min_layers must be at least 2, and pricing_pair_deep_min_layers must be 0 for local expansion or at least 2".to_string(),
+            )
+            .into());
+        }
         let contexts = parse_reference_contexts(steps, initial_locations)?;
         let candidate_strategy = CandidateStrategy::parse(candidate_strategy)?;
+        let active_trace = match (active_trace_context_id, active_trace_target_plans) {
+            (None, None) => None,
+            (Some(context_id), Some(target_plans)) => Some(ActiveTraceRequest {
+                context_id,
+                target_plans: Arc::from(target_plans),
+            }),
+            _ => return Err(SamplerError::InvalidInput(
+                "active_trace_context_id and active_trace_target_plans must be supplied together"
+                    .to_string(),
+            )
+            .into()),
+        };
         let parameters = Parameters {
             logit_scale,
             update_plan_timings,
             use_shadow_prices,
-            skip_infeasible,
+            skip_infeasible: skip_contexts_without_plan,
         };
-        let (output, report) = py.allow_threads(|| {
+        let search_result = py.allow_threads(|| {
             search_top_k_all(
                 &self.graph,
                 &self.destination_index,
@@ -105,18 +145,36 @@ impl DestinationPlanSearch {
                     result_limit: top_k,
                     frontier_width,
                     proposal_limit_per_source,
+                    symmetric_message_limit,
+                    symmetric_state_limit,
+                    symmetric_forward_proposal_limit,
                     candidate_strategy,
-                    surface_bins,
                     factor_map_max_depth,
                     stitch_bias,
                     continuation_state_limit,
+                    deep_continuation_state_limit,
                     continuation_proposal_limit,
                     seam_refresh_per_prefix,
+                    pricing_passes,
+                    pricing_seed_limit,
+                    pricing_column_limit,
+                    pricing_pair_candidate_limit,
+                    pricing_pair_deep_candidate_limit,
+                    pricing_pair_deep_min_layers,
+                    pricing_next_pass_min_new,
+                    pricing_min_layers,
                     profile: collect_profile,
+                    active_trace,
                 },
                 n_threads,
             )
-        })?;
+        });
+        let (output, report) = match search_result {
+            Err(SamplerError::NoFeasibleSequence { context_id, origin }) => {
+                return Err(SamplerError::BoundedSearchNoPlan { context_id, origin }.into());
+            }
+            result => result?,
+        };
         Ok(PyTuple::new(
             py,
             [
@@ -127,8 +185,13 @@ impl DestinationPlanSearch {
         .into())
     }
 
-    /// Prove the highest-utility complete plans on a bounded exact workload.
-    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, top_k=10, max_states=2_000_000, n_threads=None, skip_infeasible=false))]
+    /// Prove the highest-utility complete plans or report `proof incomplete`
+    /// at `max_states`.
+    ///
+    /// This is a validation oracle for small samples, not a production
+    /// fallback when `top_k` misses a plan. A successful report always states
+    /// `top_k_is_proven=true`.
+    #[pyo3(signature = (*, steps, initial_locations, logit_scale, update_plan_timings, use_shadow_prices, top_k=10, max_states=2_000_000, n_threads=None, skip_infeasible=false, use_bounded_incumbent=true))]
     #[allow(clippy::too_many_arguments)]
     fn exact_top_k(
         &self,
@@ -142,6 +205,7 @@ impl DestinationPlanSearch {
         max_states: usize,
         n_threads: Option<usize>,
         skip_infeasible: bool,
+        use_bounded_incumbent: bool,
     ) -> PyResult<PyObject> {
         validate_logit_scale(logit_scale)?;
         if top_k == 0 || max_states == 0 {
@@ -157,7 +221,24 @@ impl DestinationPlanSearch {
             use_shadow_prices,
             skip_infeasible,
         };
-        let (output, report) = py.allow_threads(|| {
+        let exact_result = py.allow_threads(|| {
+            let seed_output = if use_bounded_incumbent && top_k <= u32::MAX as usize {
+                let mut seed_parameters = parameters;
+                seed_parameters.skip_infeasible = true;
+                Some(
+                    search_top_k_all(
+                        &self.graph,
+                        &self.destination_index,
+                        &contexts,
+                        seed_parameters,
+                        TopKOptions::active_incumbent(top_k as u32),
+                        n_threads,
+                    )?
+                    .0,
+                )
+            } else {
+                None
+            };
             search_reference_top_k(
                 &self.graph,
                 &self.destination_index,
@@ -166,8 +247,21 @@ impl DestinationPlanSearch {
                 top_k,
                 max_states,
                 n_threads,
+                seed_output.as_ref(),
             )
-        })?;
+        });
+        let (output, report) = match exact_result {
+            Err(SamplerError::InvalidInput(message)) if message.contains("exceeded max_states") => {
+                let detail = message
+                    .strip_prefix("heap reference search ")
+                    .unwrap_or(&message);
+                return Err(SamplerError::InvalidInput(format!(
+                    "exact_top_k proof incomplete: {detail}"
+                ))
+                .into());
+            }
+            result => result?,
+        };
         Ok(PyTuple::new(
             py,
             [
@@ -181,6 +275,7 @@ impl DestinationPlanSearch {
 
 fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObject> {
     let result = PyDict::new(py);
+    result.set_item("top_k_is_proven", false)?;
     result.set_item("contexts", report.contexts)?;
     result.set_item(
         "forward_proposals_evaluated",
@@ -191,35 +286,160 @@ fn top_k_report_to_dict(py: Python<'_>, report: &TopKReport) -> PyResult<PyObjec
         report.backward_candidate_evaluations,
     )?;
     result.set_item(
-        "surface_proposals_evaluated",
-        report.surface_proposal_evaluations,
-    )?;
-    result.set_item(
         "factor_map_destinations_evaluated",
         report.factor_map_destination_evaluations,
     )?;
+    result.set_item("factor_map_previous_hits", report.factor_map_previous_hits)?;
+    result.set_item(
+        "factor_map_previous_builds",
+        report.factor_map_previous_builds,
+    )?;
+    result.set_item("factor_map_current_hits", report.factor_map_current_hits)?;
+    result.set_item(
+        "factor_map_current_builds",
+        report.factor_map_current_builds,
+    )?;
+    result.set_item("factor_map_next_hits", report.factor_map_next_hits)?;
+    result.set_item("factor_map_next_builds", report.factor_map_next_builds)?;
+    result.set_item(
+        "factor_map_previous_destination_scans",
+        report.factor_map_previous_destination_scans,
+    )?;
+    result.set_item(
+        "factor_map_current_destination_scans",
+        report.factor_map_current_destination_scans,
+    )?;
+    result.set_item(
+        "factor_map_next_destination_scans",
+        report.factor_map_next_destination_scans,
+    )?;
+    result.set_item(
+        "factor_map_previous_feasible_entries",
+        report.factor_map_previous_feasible_entries,
+    )?;
+    result.set_item(
+        "factor_map_current_feasible_entries",
+        report.factor_map_current_feasible_entries,
+    )?;
+    result.set_item(
+        "factor_map_next_feasible_entries",
+        report.factor_map_next_feasible_entries,
+    )?;
+    result.set_item(
+        "reverse_prefix_partial_calls",
+        report.reverse_prefix_partial_calls,
+    )?;
+    result.set_item("local_score_cache_hits", report.local_score_cache_hits)?;
+    result.set_item("local_score_cache_builds", report.local_score_cache_builds)?;
     result.set_item("continuation_proposals", report.continuation_proposals)?;
     result.set_item("seam_refresh_proposals", report.seam_refresh_proposals)?;
     result.set_item("seam_refresh_states", report.seam_refresh_states)?;
+    result.set_item(
+        "pricing_candidate_evaluations",
+        report.pricing_candidate_evaluations,
+    )?;
+    result.set_item(
+        "pricing_feasible_evaluations",
+        report.pricing_feasible_evaluations,
+    )?;
+    result.set_item("pricing_plans_added", report.pricing_plans_added)?;
+    result.set_item("pricing_pair_evaluations", report.pricing_pair_evaluations)?;
+    result.set_item(
+        "pricing_pair_feasible_evaluations",
+        report.pricing_pair_feasible_evaluations,
+    )?;
+    result.set_item("pricing_pair_plans_added", report.pricing_pair_plans_added)?;
+    result.set_item("pricing_pair_probes", report.pricing_pair_probes)?;
+    result.set_item("pricing_pair_expansions", report.pricing_pair_expansions)?;
+    let pricing_pair_probes = report
+        .pricing_pair_probe_reports
+        .iter()
+        .map(|probe| {
+            let item = PyDict::new(py);
+            item.set_item("pass_index", probe.pass_index)?;
+            item.set_item("seed_rank", probe.seed_rank)?;
+            item.set_item("left_group", probe.left_group)?;
+            item.set_item("right_group", probe.right_group)?;
+            item.set_item("evaluated", probe.evaluated)?;
+            item.set_item("feasible", probe.feasible)?;
+            item.set_item("expansion_evaluated", probe.expansion_evaluated)?;
+            item.set_item("boundary_score_gap", probe.boundary_score_gap)?;
+            item.set_item("neighborhood_saturated", probe.neighborhood_saturated)?;
+            item.set_item("entering_working_top_k", probe.entering_working_top_k)?;
+            item.set_item("kth_score_improvement", probe.kth_score_improvement)?;
+            item.set_item("max_non_additivity", probe.max_non_additivity)?;
+            item.set_item(
+                "expansion_entering_working_top_k",
+                probe.expansion_entering_working_top_k,
+            )?;
+            item.set_item(
+                "expansion_kth_score_improvement",
+                probe.expansion_kth_score_improvement,
+            )?;
+            Ok(item.into_any().unbind())
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    result.set_item("pricing_pair_probe_reports", pricing_pair_probes)?;
+    result.set_item("pricing_rounds", report.pricing_rounds)?;
     result.set_item("stitch_pairs", report.stitch_pairs)?;
     result.set_item("complete_plan_candidates", report.completed_plans)?;
-    result.set_item("infeasible_contexts", report.infeasible_contexts)?;
+    result.set_item("contexts_without_plan", report.contexts_without_plan)?;
     result.set_item("build_problem_ns", report.build_problem_ns)?;
     result.set_item("backward_search_ns", report.backward_search_ns)?;
     result.set_item("backward_guidance_ns", report.backward_guidance_ns)?;
     result.set_item("forward_search_ns", report.forward_search_ns)?;
     result.set_item("continuation_guidance_ns", report.continuation_guidance_ns)?;
-    result.set_item("surface_proposal_ns", report.surface_proposal_ns)?;
     result.set_item("factor_map_ns", report.factor_map_ns)?;
     result.set_item("seam_refresh_ns", report.seam_refresh_ns)?;
+    result.set_item("pricing_ns", report.pricing_ns)?;
     result.set_item("stitch_ns", report.stitch_ns)?;
     result.set_item("materialize_ns", report.materialize_ns)?;
     result.set_item("total_search_ns", report.total_search_ns)?;
+    let active_trace = report
+        .active_trace_targets
+        .iter()
+        .map(|target| {
+            let item = PyDict::new(py);
+            item.set_item("zones", &target.zones)?;
+            item.set_item("proposed", &target.proposed)?;
+            item.set_item("retained", &target.retained)?;
+            item.set_item("prefix_proposed", &target.prefix_proposed)?;
+            item.set_item("prefix_retained", &target.prefix_retained)?;
+            item.set_item("guidance_retained", &target.guidance_retained)?;
+            item.set_item("guidance_proposed", &target.guidance_proposed)?;
+            item.set_item("exact_guidance_rank", &target.exact_guidance_rank)?;
+            item.set_item("exact_guidance_log_gap", &target.exact_guidance_log_gap)?;
+            item.set_item(
+                "prefix_pruned",
+                target
+                    .prefix_proposed
+                    .iter()
+                    .zip(&target.prefix_retained)
+                    .map(|(proposed, retained)| match (proposed, retained) {
+                        (Some(proposed), Some(retained)) => Some(*proposed && !*retained),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            )?;
+            item.set_item(
+                "pruned",
+                target
+                    .proposed
+                    .iter()
+                    .zip(&target.retained)
+                    .map(|(proposed, retained)| *proposed && !retained)
+                    .collect::<Vec<_>>(),
+            )?;
+            Ok(item.into_any().unbind())
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    result.set_item("active_trace_targets", active_trace)?;
     Ok(result.into())
 }
 
 fn heap_report_to_dict(py: Python<'_>, report: &HeapSearchReport) -> PyResult<PyObject> {
     let result = PyDict::new(py);
+    result.set_item("top_k_is_proven", true)?;
     result.set_item("contexts", report.contexts)?;
     result.set_item("split_contexts", report.split_contexts)?;
     result.set_item(
@@ -232,6 +452,7 @@ fn heap_report_to_dict(py: Python<'_>, report: &HeapSearchReport) -> PyResult<Py
     )?;
     result.set_item("anchor_conditions_pruned", report.anchor_conditions_pruned)?;
     result.set_item("incumbent_contexts", report.incumbent_contexts)?;
+    result.set_item("incumbent_plans_seeded", report.incumbent_plans_seeded)?;
     result.set_item(
         "incumbent_children_considered",
         report.incumbent_children_considered,

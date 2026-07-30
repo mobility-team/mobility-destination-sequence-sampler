@@ -1,0 +1,71 @@
+schema_version = 1
+id = "pricing-min-layers-3-runtime-validation"
+kind = "quality_runtime"
+stage = "validation"
+hypothesis = "Pricing all contexts from depth 3 retains its validated Mass@10 gain while adding no more than 5% full-workload-calibrated wall time."
+mechanism = "The added work is limited to depth 3 to 5 completed-path neighborhoods and reuses exact factor maps, so its aggregate cost should remain small despite increasing pricing CPU."
+falsifier = "Reject the change if the linked quality gates fail or the paired median wall-time regression exceeds 5%."
+unknowns = ["A 20,000-context calibrated sample may not capture all operating-system and cache effects of the complete 81,844-context workload."]
+
+[comparison]
+allowed_differences = ["pricing_min_layers"]
+
+[cohort]
+name = "pricing-min-layers-3-runtime-validation"
+role = "validation"
+selection_seed = 271828
+selector = "calibrated"
+contexts = 20000
+expected_fingerprint = "ff518826f56f460471c4"
+
+[gates]
+max_wall_regression = 0.05
+stratified_mass_delta_min = 0.002
+zero_mass_delta_max = 0.0
+
+[evidence]
+quality_artifact = "../runs/20260727T143503758599Z-pricing-min-layers-3-quality-validation-9ddefb05/result.json"
+
+[baseline.options]
+frontier_width = 40
+proposal_limit_per_source = 16
+symmetric_message_limit = 4
+symmetric_state_limit = 4
+symmetric_forward_proposal_limit = 20
+candidate_strategy = "symmetric_factor_map"
+factor_map_max_depth = 5
+stitch_bias = 1
+continuation_state_limit = 1
+deep_continuation_state_limit = 2
+continuation_proposal_limit = 1
+seam_refresh_per_prefix = 1
+pricing_passes = 2
+pricing_seed_limit = 10
+pricing_column_limit = 4
+pricing_pair_candidate_limit = 4
+pricing_pair_deep_candidate_limit = 8
+pricing_pair_deep_min_layers = 9
+pricing_next_pass_min_new = 3
+pricing_min_layers = 6
+
+[candidate.options]
+frontier_width = 40
+proposal_limit_per_source = 16
+symmetric_message_limit = 4
+symmetric_state_limit = 4
+symmetric_forward_proposal_limit = 20
+candidate_strategy = "symmetric_factor_map"
+factor_map_max_depth = 5
+stitch_bias = 1
+continuation_state_limit = 1
+deep_continuation_state_limit = 2
+continuation_proposal_limit = 1
+seam_refresh_per_prefix = 1
+pricing_passes = 2
+pricing_seed_limit = 10
+pricing_column_limit = 4
+pricing_pair_candidate_limit = 4
+pricing_pair_deep_candidate_limit = 8
+pricing_pair_deep_min_layers = 9
+pricing_next_pass_min_new = 3
+pricing_min_layers = 3

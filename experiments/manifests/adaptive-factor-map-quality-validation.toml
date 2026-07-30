@@ -1,0 +1,70 @@
+schema_version = 1
+id = "adaptive-factor-map-quality-validation"
+kind = "quality_only"
+stage = "validation"
+hypothesis = "Using asymmetric factor maps only when fixed destinations separate every variable run and no anchor repeats preserves post-stratified Mass@10 and certified zero-overlap count."
+mechanism = "Ordinary exact factor maps observe both boundaries of an isolated variable, while symmetric partial messages remain enabled for adjacent unknowns and non-local repeated-anchor constraints."
+falsifier = "Reject the router if post-stratified Mass@10 decreases or certified zero-overlap cases increase on the locked validation cohort."
+unknowns = ["A fixed boundary can still couple the variables on either side through its local factor, so the structural condition is empirical rather than an exact decomposition."]
+
+[comparison]
+allowed_differences = ["candidate_strategy"]
+
+[cohort]
+name = "adaptive-factor-map-quality-validation"
+role = "validation"
+selection_seed = 346410
+selector = "stratified"
+contexts_per_stratum = 10
+expected_fingerprint = "ffb8b24b7f05132eac26"
+
+[gates]
+stratified_mass_delta_min = 0.0
+zero_mass_delta_max = 0.0
+
+[evidence]
+quality_artifact = ""
+
+[baseline.options]
+frontier_width = 40
+proposal_limit_per_source = 16
+symmetric_message_limit = 4
+symmetric_state_limit = 4
+symmetric_forward_proposal_limit = 20
+candidate_strategy = "symmetric_factor_map"
+factor_map_max_depth = 5
+stitch_bias = 1
+continuation_state_limit = 1
+deep_continuation_state_limit = 2
+continuation_proposal_limit = 1
+seam_refresh_per_prefix = 1
+pricing_passes = 2
+pricing_seed_limit = 10
+pricing_column_limit = 4
+pricing_pair_candidate_limit = 4
+pricing_pair_deep_candidate_limit = 8
+pricing_pair_deep_min_layers = 0
+pricing_next_pass_min_new = 3
+pricing_min_layers = 6
+
+[candidate.options]
+frontier_width = 40
+proposal_limit_per_source = 16
+symmetric_message_limit = 4
+symmetric_state_limit = 4
+symmetric_forward_proposal_limit = 20
+candidate_strategy = "adaptive_factor_map"
+factor_map_max_depth = 5
+stitch_bias = 1
+continuation_state_limit = 1
+deep_continuation_state_limit = 2
+continuation_proposal_limit = 1
+seam_refresh_per_prefix = 1
+pricing_passes = 2
+pricing_seed_limit = 10
+pricing_column_limit = 4
+pricing_pair_candidate_limit = 4
+pricing_pair_deep_candidate_limit = 8
+pricing_pair_deep_min_layers = 0
+pricing_next_pass_min_new = 3
+pricing_min_layers = 6

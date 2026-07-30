@@ -192,6 +192,7 @@ pub struct HeapSearchReport {
     pub anchor_conditions_considered: u64,
     pub anchor_conditions_pruned: u64,
     pub incumbent_contexts: u64,
+    pub incumbent_plans_seeded: u64,
     pub incumbent_children_considered: u64,
     pub children_pruned_by_incumbent: u64,
     pub queue_entries_popped: u64,
@@ -211,6 +212,7 @@ impl HeapSearchReport {
         self.anchor_conditions_considered += other.anchor_conditions_considered;
         self.anchor_conditions_pruned += other.anchor_conditions_pruned;
         self.incumbent_contexts += other.incumbent_contexts;
+        self.incumbent_plans_seeded += other.incumbent_plans_seeded;
         self.incumbent_children_considered += other.incumbent_children_considered;
         self.children_pruned_by_incumbent += other.children_pruned_by_incumbent;
         self.queue_entries_popped += other.queue_entries_popped;
@@ -237,36 +239,108 @@ struct RankedPlan {
     score: f64,
 }
 
-fn independent_home_ranges(
-    context: &Context,
-    ranges: &[(usize, usize)],
-) -> Option<Vec<(usize, usize)>> {
-    if ranges.len() <= 1 {
-        return None;
-    }
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
-    for &(start, end) in ranges {
-        let only_fixed = context.steps[start..end]
-            .iter()
-            .all(|step| step.fixed_destination.is_some());
-        if only_fixed && !merged.is_empty() {
-            merged.last_mut().unwrap().1 = end;
-        } else {
-            merged.push((start, end));
+struct TopKIncumbent {
+    limit: usize,
+    plans: Vec<RankedPlan>,
+}
+
+impl TopKIncumbent {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            plans: Vec::with_capacity(limit),
         }
     }
-    if merged.len() <= 1
-        || merged[..merged.len() - 1].iter().any(|&(_, end)| {
-            context.steps[end].fixed_destination.is_none()
-                && context.steps[end]
-                    .arrival_time_rigidity
-                    .is_none_or(|rigidity| rigidity != 0.0)
-        })
-    {
-        None
-    } else {
-        Some(merged)
+
+    fn insert(&mut self, plan: RankedPlan) {
+        if self.plans.iter().any(|current| current.zones == plan.zones) {
+            return;
+        }
+        self.plans.push(plan);
+        self.plans.sort_unstable_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.zones.cmp(&right.zones))
+        });
+        self.plans.truncate(self.limit);
     }
+
+    fn threshold(&self) -> Option<f64> {
+        (self.plans.len() == self.limit).then(|| self.plans[self.limit - 1].score)
+    }
+
+    fn into_zones(self) -> Vec<Vec<usize>> {
+        self.plans.into_iter().map(|plan| plan.zones).collect()
+    }
+}
+
+fn seed_plans_by_context(graph: &OdGraph, output: &OutputTable) -> BTreeMap<u64, Vec<Vec<usize>>> {
+    let mut rows_by_plan = BTreeMap::<(u64, u32), Vec<(u32, usize)>>::new();
+    for index in 0..output.destination.len() {
+        rows_by_plan
+            .entry((output.context_id[index], output.draw_id[index]))
+            .or_default()
+            .push((
+                output.layer[index],
+                graph.zone_index[&output.destination[index]],
+            ));
+    }
+    let mut plans_by_context = BTreeMap::<u64, Vec<Vec<usize>>>::new();
+    for ((context_id, _), mut rows) in rows_by_plan {
+        rows.sort_unstable_by_key(|(layer, _)| *layer);
+        plans_by_context
+            .entry(context_id)
+            .or_default()
+            .push(rows.into_iter().map(|(_, zone)| zone).collect());
+    }
+    plans_by_context
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seeded_incumbent(
+    graph: &OdGraph,
+    destinations: &DestinationIndex,
+    context: &Context,
+    problem: &OracleProblem<'_>,
+    parameters: Parameters,
+    limit: usize,
+    seeds: Option<&[Vec<usize>]>,
+) -> TopKIncumbent {
+    let mut incumbent = TopKIncumbent::new(limit);
+    for zones in seeds.into_iter().flatten() {
+        if zones.len() != context.steps.len() {
+            continue;
+        }
+        let Some((score, _)) = score_zones(
+            ScoringInputs {
+                graph,
+                destinations,
+                context,
+                problem: &problem.scoring,
+                parameters,
+            },
+            zones,
+        ) else {
+            continue;
+        };
+        incumbent.insert(RankedPlan {
+            zones: zones.clone(),
+            score,
+        });
+    }
+    incumbent
+}
+
+fn independent_home_ranges(
+    _context: &Context,
+    _ranges: &[(usize, usize)],
+) -> Option<Vec<(usize, usize)>> {
+    // A local factor spans a fixed-home boundary: scoring independently then
+    // concatenating segment plans can select a sequence rejected by the full
+    // scorer (for example context 9619).  Do not use this as an exact-oracle
+    // shortcut until the boundary factor is allocated exactly during merge.
+    None
 }
 
 fn cross_home_anchor_ids(context: &Context, ranges: &[(usize, usize)]) -> Vec<u32> {
@@ -1093,6 +1167,7 @@ fn search_reference_top_k_sequential(
     parameters: Parameters,
     k: usize,
     max_states: usize,
+    seed_plans: Option<&BTreeMap<u64, Vec<Vec<usize>>>>,
 ) -> Result<(OutputTable, HeapSearchReport), SamplerError> {
     let minimum_edge_cost = graph
         .edges
@@ -1160,6 +1235,7 @@ fn search_reference_top_k_sequential(
                         parameters,
                         segment_k,
                         max_states,
+                        None,
                     )?;
                     segment_plans.push(ranked_plans_from_output(
                         graph,
@@ -1293,6 +1369,7 @@ fn search_reference_top_k_sequential(
                     conditioned_parameters,
                     1,
                     max_states,
+                    None,
                 )?;
                 report.add_subsearch(&conditioned_report);
                 if table.destination.is_empty() {
@@ -1357,7 +1434,18 @@ fn search_reference_top_k_sequential(
             &layer_bounds,
             relaxed_suffix.as_deref(),
         );
-        let (mut incumbent, incumbent_children) = if k == 1 {
+        let mut incumbent = seeded_incumbent(
+            graph,
+            destinations,
+            context,
+            &problem,
+            parameters,
+            k,
+            seed_plans.and_then(|plans| plans.get(&context.context_id).map(Vec::as_slice)),
+        );
+        let seeded = incumbent.plans.len();
+        report.incumbent_plans_seeded += seeded as u64;
+        let (greedy, incumbent_children) = if k == 1 && seeded == 0 {
             greedy_incumbent(
                 graph,
                 destinations,
@@ -1372,7 +1460,10 @@ fn search_reference_top_k_sequential(
         } else {
             (None, 0)
         };
-        if incumbent.is_some() {
+        if let Some(plan) = greedy {
+            incumbent.insert(plan);
+        }
+        if !incumbent.plans.is_empty() {
             report.incumbent_contexts += 1;
         }
         report.incumbent_children_considered += incumbent_children;
@@ -1381,13 +1472,12 @@ fn search_reference_top_k_sequential(
         let mut context_states_pushed = 1usize;
         let mut pending_children_in_heap = 0usize;
         let mut insertion_order = 1u64;
-        let mut complete: Vec<Vec<usize>> = Vec::with_capacity(k);
 
         while let Some(entry) = heap.pop() {
             report.queue_entries_popped += 1;
             if incumbent
-                .as_ref()
-                .is_some_and(|best| entry.upper_bound() <= best.score)
+                .threshold()
+                .is_some_and(|threshold| entry.upper_bound() < threshold)
             {
                 break;
             }
@@ -1438,17 +1528,10 @@ fn search_reference_top_k_sequential(
                     node_index = node.parent;
                 }
                 zones.reverse();
-                if k == 1 {
-                    incumbent = Some(RankedPlan {
-                        zones,
-                        score: state.score,
-                    });
-                    break;
-                }
-                complete.push(zones);
-                if complete.len() == k {
-                    break;
-                }
+                incumbent.insert(RankedPlan {
+                    zones,
+                    score: state.score,
+                });
                 continue;
             }
             if context_states_pushed >= max_states {
@@ -1470,9 +1553,9 @@ fn search_reference_top_k_sequential(
                 relaxed_suffix.as_deref(),
             );
             report.children_considered += children_considered;
-            if let Some(best) = &incumbent {
+            if let Some(threshold) = incumbent.threshold() {
                 let before = pending_children.len();
-                pending_children.retain(|child| child.upper_bound > best.score);
+                pending_children.retain(|child| child.upper_bound >= threshold);
                 report.children_pruned_by_incumbent += (before - pending_children.len()) as u64;
             }
             pending_children.sort_unstable_by(|left, right| {
@@ -1527,11 +1610,7 @@ fn search_reference_top_k_sequential(
             report.maximum_heap_size = report.maximum_heap_size.max(heap.len() as u64);
         }
 
-        let plans = if k == 1 {
-            incumbent.map(|plan| vec![plan.zones]).unwrap_or_default()
-        } else {
-            complete
-        };
+        let plans = incumbent.into_zones();
         if plans.len() < k {
             if parameters.skip_infeasible {
                 continue;
@@ -1554,6 +1633,7 @@ fn search_reference_top_k_sequential(
     Ok((output, report))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn search_reference_top_k(
     graph: &OdGraph,
     destinations: &DestinationIndex,
@@ -1562,7 +1642,9 @@ pub fn search_reference_top_k(
     k: usize,
     max_states: usize,
     n_threads: Option<usize>,
+    seed_output: Option<&OutputTable>,
 ) -> Result<(OutputTable, HeapSearchReport), SamplerError> {
+    let seed_plans = seed_output.map(|output| seed_plans_by_context(graph, output));
     let compute = || {
         contexts
             .par_iter()
@@ -1574,6 +1656,7 @@ pub fn search_reference_top_k(
                     parameters,
                     k,
                     max_states,
+                    seed_plans.as_ref(),
                 )
             })
             .collect::<Result<Vec<_>, SamplerError>>()

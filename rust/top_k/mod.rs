@@ -1,12 +1,13 @@
-//! Minimal bounded bidirectional top-K search.
+//! Fast bounded destination-sequence search.
 //!
-//! This is intentionally a bounded stitch-layer beam search, not the previous all-zone
-//! bidirectional DP. It uses bounded candidate lists and beam frontiers in
-//! both directions, scores every locally complete rigidity-aware factor on its
-//! owning front, and scores only the two factors crossing the stitch boundary when
-//! stitching.
+//! The search shortlists destinations, grows partial plans from both ends,
+//! joins them near the middle, and fully scores every returned plan. Child
+//! modules own one phase each; shared state and invariants live here. See
+//! `MODELLER_GUIDE.md` for the plain-language model.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{hash_map::Entry, BTreeSet, HashMap};
+use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -16,37 +17,59 @@ use crate::input::Context;
 use crate::model::{DestinationIndex, OdGraph};
 use crate::output::{OutputRow, OutputTable};
 use crate::scoring::{
-    build_scoring_problem, fixed_destination_value, score_inbound_partial, score_local_weight,
-    score_zones, Parameters, ScoringInputs, ScoringProblem,
+    adjusted_times, build_scoring_problem, fixed_destination_value, score_local_weight,
+    score_zones, Parameters, PreparedLocalScorer, ScoringInputs, ScoringProblem,
 };
 
+mod backward;
 mod candidates;
+mod factor_maps;
+mod forward;
+mod improvement;
+mod refresh;
+mod stitch;
 
+use backward::{backward_beam, extend_backward_guidance};
 use candidates::{
-    candidates, reverse_projection_candidates, surface_candidates, CandidateCache, CandidateInputs,
-    CandidateQuery,
+    candidates, reverse_projection_candidates, CandidateCache, CandidateInputs, CandidateQuery,
 };
+use factor_maps::{
+    factor_map_candidates, reverse_factor_map_candidates, reverse_prefix_partial_score,
+    FactorMapRequest, ReverseFactorMapRequest,
+};
+use forward::forward_beam;
+use improvement::{improve_complete_plans, RankedPlan};
+use refresh::refresh_stitch_frontier;
+pub use stitch::search_top_k_all;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandidateStrategy {
     Heuristic,
-    Surface,
     FactorMap,
-    PartialScreen,
+    SymmetricFactorMap,
+    AdaptiveFactorMap,
 }
 
 impl CandidateStrategy {
     pub(crate) fn parse(value: &str) -> Result<Self, SamplerError> {
         match value {
             "heuristic" => Ok(Self::Heuristic),
-            "surface" => Ok(Self::Surface),
             "factor_map" => Ok(Self::FactorMap),
-            "partial_screen" => Ok(Self::PartialScreen),
+            "symmetric_factor_map" => Ok(Self::SymmetricFactorMap),
+            "adaptive_factor_map" => Ok(Self::AdaptiveFactorMap),
             _ => Err(SamplerError::InvalidInput(
-                "candidate_strategy must be 'surface', 'factor_map', 'partial_screen', or 'heuristic'"
+                "candidate_strategy must be 'factor_map', 'symmetric_factor_map', 'adaptive_factor_map', or 'heuristic'"
                     .to_string(),
             )),
         }
+    }
+
+    #[inline]
+    pub(crate) fn uses_factor_maps(self) -> bool {
+        matches!(
+            self,
+            Self::FactorMap | Self::SymmetricFactorMap | Self::AdaptiveFactorMap
+        )
     }
 }
 
@@ -74,11 +97,72 @@ struct BackwardMessages {
     /// through the prefix layers. It guides proposal/ranking but never limits
     /// the wider frontier used for the exact final stitch.
     guidance_frontiers: Vec<Vec<usize>>,
+    /// Independent right-to-left partial messages used only by the symmetric
+    /// proposal channel. Exact suffix ownership remains in `nodes`.
+    partial_frontiers: Vec<Vec<usize>>,
+    /// Feasible reverse proposals for repeated anchors. These compact
+    /// assignments preserve destination diversity without retaining a full
+    /// suffix state for every anchor alternative.
+    partial_anchor_candidates: Vec<Vec<usize>>,
+}
+
+/// Fast deterministic hashing for per-context caches whose keys contain only
+/// trusted compact integer indexes. These keys cannot be attacker-controlled,
+/// so the collision hardening of the standard `RandomState` is unnecessary in
+/// the hottest exact-score lookup path.
+#[derive(Default)]
+struct TrustedIndexHasher(u64);
+
+impl TrustedIndexHasher {
+    #[inline]
+    fn add(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for TrustedIndexHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.add(u64::from(byte));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, value: u8) {
+        self.add(u64::from(value));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.add(value);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, value: usize) {
+        self.add(value as u64);
+    }
+}
+
+type TrustedIndexMap<K, V> = HashMap<K, V, BuildHasherDefault<TrustedIndexHasher>>;
+type LocalScoreMap = TrustedIndexMap<(usize, usize, usize, Option<usize>), Option<f64>>;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BackwardGuidanceMode {
+    Exact,
+    Partial,
 }
 
 #[derive(Default)]
 struct LocalScoreCache {
-    values: HashMap<(usize, usize, usize, Option<usize>), Option<f64>>,
+    values: LocalScoreMap,
+    profile: bool,
+    hits: u64,
+    builds: u64,
 }
 
 #[derive(Default)]
@@ -86,14 +170,78 @@ struct FactorMapCache {
     /// Each exact map is indexed by the destination being proposed at the
     /// current layer.  The fixed neighbours in its key make it reusable across
     /// equivalent retained states without weakening rigidity feasibility.
-    previous: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
-    current: HashMap<(usize, usize, usize), Vec<Option<f64>>>,
-    next: HashMap<(usize, usize, Option<usize>), Vec<Option<f64>>>,
-    partial_current: HashMap<(usize, usize), Vec<Option<f64>>>,
-    partial_next: HashMap<(usize, usize), Vec<Option<f64>>>,
+    previous: HashMap<(usize, usize, usize), FactorScoreMap>,
+    current: HashMap<(usize, usize, usize), FactorScoreMap>,
+    next: HashMap<(usize, usize, Option<usize>), FactorScoreMap>,
+    previous_hits: u64,
+    previous_builds: u64,
+    current_hits: u64,
+    current_builds: u64,
+    next_hits: u64,
+    next_builds: u64,
+    previous_destination_scans: u64,
+    current_destination_scans: u64,
+    next_destination_scans: u64,
+    previous_feasible_entries: u64,
+    current_feasible_entries: u64,
+    next_feasible_entries: u64,
+    reverse_prefix_partial_calls: u64,
+}
+
+/// Feasible factor scores, aligned to an activity-domain position rather than
+/// the global zone index. Infeasible destinations are omitted completely.
+enum FactorPositions {
+    U16(Vec<u16>),
+    Usize(Vec<usize>),
+}
+
+struct FactorScoreMap {
+    positions: FactorPositions,
+    scores: Vec<f64>,
+}
+
+impl FactorScoreMap {
+    fn with_capacity(domain_len: usize) -> Self {
+        let positions = if u16::try_from(domain_len.saturating_sub(1)).is_ok() {
+            FactorPositions::U16(Vec::with_capacity(domain_len))
+        } else {
+            FactorPositions::Usize(Vec::with_capacity(domain_len))
+        };
+        Self {
+            positions,
+            scores: Vec::with_capacity(domain_len),
+        }
+    }
+
+    fn push(&mut self, position: usize, score: f64) {
+        match &mut self.positions {
+            FactorPositions::U16(positions) => positions.push(position as u16),
+            FactorPositions::Usize(positions) => positions.push(position),
+        }
+        self.scores.push(score);
+    }
+
+    fn len(&self) -> usize {
+        self.scores.len()
+    }
+
+    fn entry(&self, index: usize) -> (usize, f64) {
+        let position = match &self.positions {
+            FactorPositions::U16(positions) => positions[index] as usize,
+            FactorPositions::Usize(positions) => positions[index],
+        };
+        (position, self.scores[index])
+    }
 }
 
 impl LocalScoreCache {
+    fn new(profile: bool) -> Self {
+        Self {
+            profile,
+            ..Self::default()
+        }
+    }
+
     fn score(
         &mut self,
         inputs: ScoringInputs<'_>,
@@ -104,7 +252,13 @@ impl LocalScoreCache {
     ) -> Option<f64> {
         let key = (layer, origin, destination, next_destination);
         if let Some(score) = self.values.get(&key) {
+            if self.profile {
+                self.hits += 1;
+            }
             return *score;
+        }
+        if self.profile {
+            self.builds += 1;
         }
         let score = score_local_weight(inputs, layer, origin, destination, next_destination);
         self.values.insert(key, score);
@@ -112,15 +266,58 @@ impl LocalScoreCache {
     }
 }
 
-fn anchor_slots(context: &Context) -> HashMap<u32, usize> {
-    let mut slots = HashMap::new();
-    for step in &context.steps {
-        if let Some(anchor_id) = step.anchor_id {
-            let next_slot = slots.len();
-            slots.entry(anchor_id).or_insert(next_slot);
+/// Compact anchor bookkeeping prepared once for a context.
+///
+/// Search passes operate on sequence positions, so they should not repeatedly
+/// hash the transport-model `anchor_id`. Each step instead gets an optional
+/// compact slot into the anchor assignment vectors carried by search states.
+struct AnchorLayout {
+    step_slots: Vec<Option<usize>>,
+    repeated_slots: Vec<bool>,
+}
+
+impl AnchorLayout {
+    fn build(context: &Context) -> Self {
+        let mut slots_by_id = HashMap::new();
+        let mut step_slots = Vec::with_capacity(context.steps.len());
+        let mut counts = Vec::<u32>::new();
+        for step in &context.steps {
+            let slot = step.anchor_id.map(|anchor_id| {
+                let next_slot = slots_by_id.len();
+                let slot = *slots_by_id.entry(anchor_id).or_insert(next_slot);
+                if slot == counts.len() {
+                    counts.push(0);
+                }
+                counts[slot] += 1;
+                slot
+            });
+            step_slots.push(slot);
+        }
+        Self {
+            step_slots,
+            repeated_slots: counts.into_iter().map(|count| count > 1).collect(),
         }
     }
-    slots
+
+    fn len(&self) -> usize {
+        self.repeated_slots.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.repeated_slots.is_empty()
+    }
+
+    fn slot(&self, layer: usize) -> Option<usize> {
+        self.step_slots[layer]
+    }
+
+    fn repeats(&self, slot: usize) -> bool {
+        self.repeated_slots[slot]
+    }
+
+    fn has_repeated(&self) -> bool {
+        self.repeated_slots.iter().any(|&repeated| repeated)
+    }
 }
 
 fn anchors_compatible(left: &[Option<usize>], right: &[Option<usize>]) -> bool {
@@ -145,41 +342,329 @@ pub struct TopKReport {
     pub contexts: u64,
     pub forward_candidate_evaluations: u64,
     pub backward_candidate_evaluations: u64,
-    pub surface_proposal_evaluations: u64,
     pub factor_map_destination_evaluations: u64,
+    pub factor_map_previous_hits: u64,
+    pub factor_map_previous_builds: u64,
+    pub factor_map_current_hits: u64,
+    pub factor_map_current_builds: u64,
+    pub factor_map_next_hits: u64,
+    pub factor_map_next_builds: u64,
+    pub factor_map_previous_destination_scans: u64,
+    pub factor_map_current_destination_scans: u64,
+    pub factor_map_next_destination_scans: u64,
+    pub factor_map_previous_feasible_entries: u64,
+    pub factor_map_current_feasible_entries: u64,
+    pub factor_map_next_feasible_entries: u64,
+    pub reverse_prefix_partial_calls: u64,
+    pub local_score_cache_hits: u64,
+    pub local_score_cache_builds: u64,
     pub continuation_proposals: u64,
     pub seam_refresh_proposals: u64,
     pub seam_refresh_states: u64,
+    pub pricing_candidate_evaluations: u64,
+    pub pricing_feasible_evaluations: u64,
+    pub pricing_plans_added: u64,
+    pub pricing_pair_evaluations: u64,
+    pub pricing_pair_feasible_evaluations: u64,
+    pub pricing_pair_plans_added: u64,
+    pub pricing_pair_probes: u64,
+    pub pricing_pair_expansions: u64,
+    pub pricing_pair_probe_reports: Vec<PricingPairProbeReport>,
+    pub pricing_rounds: u64,
     pub stitch_pairs: u64,
     pub completed_plans: u64,
-    pub infeasible_contexts: u64,
+    /// Contexts for which bounded search returned no complete feasible plan.
+    /// This is not proof that the model inputs admit no feasible plan.
+    pub contexts_without_plan: u64,
     pub build_problem_ns: u64,
     pub backward_search_ns: u64,
     pub backward_guidance_ns: u64,
     pub forward_search_ns: u64,
     pub continuation_guidance_ns: u64,
-    pub surface_proposal_ns: u64,
     pub factor_map_ns: u64,
     pub seam_refresh_ns: u64,
+    pub pricing_ns: u64,
     pub stitch_ns: u64,
     pub materialize_ns: u64,
     pub total_search_ns: u64,
+    pub active_trace_targets: Vec<ActiveTraceTargetReport>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone)]
+pub struct PricingPairProbeReport {
+    pub pass_index: usize,
+    pub seed_rank: usize,
+    pub left_group: usize,
+    pub right_group: usize,
+    pub evaluated: usize,
+    pub feasible: usize,
+    pub expansion_evaluated: usize,
+    pub boundary_score_gap: Option<f64>,
+    pub neighborhood_saturated: bool,
+    pub entering_working_top_k: usize,
+    pub kth_score_improvement: f64,
+    pub max_non_additivity: f64,
+    pub expansion_entering_working_top_k: usize,
+    pub expansion_kth_score_improvement: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActiveTraceRequest {
+    pub context_id: u64,
+    pub target_plans: Arc<[Vec<u32>]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveTraceTargetReport {
+    pub zones: Vec<u32>,
+    pub proposed: Vec<bool>,
+    pub retained: Vec<bool>,
+    /// Whether the exact target prefix through each layer entered that
+    /// layer's candidate set. Unlike `proposed`, this keeps parent lineage.
+    pub prefix_proposed: Vec<Option<bool>>,
+    /// Whether the exact target prefix through each layer survived the
+    /// forward frontier. Unlike `retained`, this keeps parent lineage.
+    pub prefix_retained: Vec<Option<bool>>,
+    /// Whether a target zone appeared in either retained reverse-guidance
+    /// frontier at the corresponding layer.
+    pub guidance_retained: Vec<bool>,
+    /// Whether a target zone entered either reverse-guidance candidate pool
+    /// at the corresponding layer.
+    pub guidance_proposed: Vec<bool>,
+    /// Best rank of a target zone in the exact reverse-guidance candidate
+    /// score at each layer; `None` means it was never proposed there.
+    pub exact_guidance_rank: Vec<Option<usize>>,
+    /// Score loss of the best target-zone reverse-guidance child relative to
+    /// the best child at that layer. This exposes whether a missed target was
+    /// narrowly or decisively below the one-state continuation channel.
+    pub exact_guidance_log_gap: Vec<Option<f64>>,
+}
+
+#[derive(Clone)]
 pub struct TopKOptions {
     pub exploration_seed: u64,
     pub result_limit: u32,
     pub frontier_width: usize,
     pub proposal_limit_per_source: usize,
+    pub symmetric_message_limit: usize,
+    pub symmetric_state_limit: usize,
+    pub symmetric_forward_proposal_limit: usize,
     pub candidate_strategy: CandidateStrategy,
-    pub surface_bins: usize,
     pub factor_map_max_depth: usize,
     pub stitch_bias: i32,
     pub continuation_state_limit: usize,
+    pub deep_continuation_state_limit: usize,
     pub continuation_proposal_limit: usize,
     pub seam_refresh_per_prefix: usize,
+    /// Exact single-choice improvement rounds over complete plans.
+    /// Zero disables this phase.
+    pub pricing_passes: usize,
+    /// Complete plans retained between improvement rounds.
+    pub pricing_seed_limit: usize,
+    /// Best new plans retained from each single-choice neighborhood.
+    pub pricing_column_limit: usize,
+    /// Best exact conditional replacements crossed for each interacting pair.
+    /// Zero disables the experimental two-variable neighborhood.
+    pub pricing_pair_candidate_limit: usize,
+    /// Wider pair candidate budget for local or depth-routed expansion.
+    pub pricing_pair_deep_candidate_limit: usize,
+    /// Zero enables local probe-and-expand; positive values retain a depth comparator.
+    pub pricing_pair_deep_min_layers: usize,
+    /// Require this many newly improved plans to survive before another round.
+    /// Zero runs every requested improvement round.
+    pub pricing_next_pass_min_new: usize,
+    /// Do not improve contexts shallower than this many destination layers.
+    pub pricing_min_layers: usize,
     pub profile: bool,
+    pub active_trace: Option<ActiveTraceRequest>,
+}
+
+impl TopKOptions {
+    pub(crate) fn active_incumbent(result_limit: u32) -> Self {
+        Self {
+            exploration_seed: 42,
+            result_limit,
+            frontier_width: 40,
+            proposal_limit_per_source: 16,
+            symmetric_message_limit: 4,
+            symmetric_state_limit: 4,
+            symmetric_forward_proposal_limit: 20,
+            candidate_strategy: CandidateStrategy::AdaptiveFactorMap,
+            factor_map_max_depth: 5,
+            stitch_bias: 1,
+            continuation_state_limit: 1,
+            deep_continuation_state_limit: 2,
+            continuation_proposal_limit: 1,
+            seam_refresh_per_prefix: 1,
+            pricing_passes: 2,
+            pricing_seed_limit: 10,
+            pricing_column_limit: 4,
+            pricing_pair_candidate_limit: 4,
+            pricing_pair_deep_candidate_limit: 8,
+            pricing_pair_deep_min_layers: 0,
+            pricing_next_pass_min_new: 3,
+            pricing_min_layers: 6,
+            profile: false,
+            active_trace: None,
+        }
+    }
+}
+
+struct ActiveTrace {
+    targets: Vec<(Vec<usize>, ActiveTraceTargetReport)>,
+}
+
+impl ActiveTrace {
+    fn new(
+        request: &ActiveTraceRequest,
+        graph: &OdGraph,
+        context: &Context,
+    ) -> Result<Self, SamplerError> {
+        let mut targets = Vec::with_capacity(request.target_plans.len());
+        for zones in request.target_plans.iter() {
+            if zones.len() != context.steps.len() {
+                return Err(SamplerError::InvalidInput(format!(
+                    "active trace target for context {} has {} zones; expected {}",
+                    context.context_id,
+                    zones.len(),
+                    context.steps.len()
+                )));
+            }
+            let internal = zones
+                .iter()
+                .map(|zone| {
+                    graph.zone_index.get(zone).copied().ok_or_else(|| {
+                        SamplerError::InvalidInput(format!(
+                            "active trace target references unknown zone {zone}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            targets.push((
+                internal,
+                ActiveTraceTargetReport {
+                    zones: zones.clone(),
+                    proposed: vec![false; zones.len()],
+                    retained: vec![false; zones.len()],
+                    prefix_proposed: vec![None; zones.len()],
+                    prefix_retained: vec![None; zones.len()],
+                    guidance_retained: vec![false; zones.len()],
+                    guidance_proposed: vec![false; zones.len()],
+                    exact_guidance_rank: vec![None; zones.len()],
+                    exact_guidance_log_gap: vec![None; zones.len()],
+                },
+            ));
+        }
+        Ok(Self { targets })
+    }
+
+    fn proposed(&mut self, layer: usize, candidates: &[usize]) {
+        for (targets, report) in &mut self.targets {
+            report.proposed[layer] |= candidates.contains(&targets[layer]);
+        }
+    }
+
+    fn retained(&mut self, layer: usize, destination: usize) {
+        for (targets, report) in &mut self.targets {
+            report.retained[layer] |= targets[layer] == destination;
+        }
+    }
+
+    fn prefix_matches(
+        nodes: &[PrefixNode],
+        mut node_index: usize,
+        target: &[usize],
+        prefix_len: usize,
+    ) -> bool {
+        for expected_layer in (0..prefix_len).rev() {
+            let node = &nodes[node_index];
+            if node.parent.is_none() || node.zone != target[expected_layer] {
+                return false;
+            }
+            node_index = node.parent.expect("non-root prefix node has a parent");
+        }
+        true
+    }
+
+    fn prefix_proposed(
+        &mut self,
+        layer: usize,
+        nodes: &[PrefixNode],
+        parent_index: usize,
+        candidates: &[usize],
+    ) {
+        for (target, report) in &mut self.targets {
+            let matches_target = candidates.contains(&target[layer])
+                && Self::prefix_matches(nodes, parent_index, target, layer);
+            report.prefix_proposed[layer] =
+                Some(report.prefix_proposed[layer].unwrap_or(false) || matches_target);
+        }
+    }
+
+    fn prefix_retained(
+        &mut self,
+        layer: usize,
+        nodes: &[PrefixNode],
+        parent_index: usize,
+        destination: usize,
+    ) {
+        for (target, report) in &mut self.targets {
+            let matches_target = destination == target[layer]
+                && Self::prefix_matches(nodes, parent_index, target, layer);
+            report.prefix_retained[layer] =
+                Some(report.prefix_retained[layer].unwrap_or(false) || matches_target);
+        }
+    }
+
+    fn guidance_retained(&mut self, layer: usize, destination: usize) {
+        for (targets, report) in &mut self.targets {
+            report.guidance_retained[layer] |= targets[layer] == destination;
+        }
+    }
+
+    fn guidance_proposed(&mut self, layer: usize, candidates: &[usize]) {
+        for (targets, report) in &mut self.targets {
+            report.guidance_proposed[layer] |= candidates.contains(&targets[layer]);
+        }
+    }
+
+    fn exact_guidance_rank(
+        &mut self,
+        layer: usize,
+        children: &[(usize, usize, f64)],
+        scores: &[f64],
+    ) {
+        let mut ranked = scores.iter().copied().enumerate().collect::<Vec<_>>();
+        ranked.sort_unstable_by(|(left_index, left), (right_index, right)| {
+            right
+                .total_cmp(left)
+                .then_with(|| left_index.cmp(right_index))
+        });
+        for (target, report) in &mut self.targets {
+            let target = ranked
+                .iter()
+                .find(|(index, _)| children[*index].1 == target[layer])
+                .copied();
+            if let Some((target_index, target_score)) = target {
+                let rank = ranked
+                    .iter()
+                    .position(|(index, _)| *index == target_index)
+                    .expect("target score came from ranked children")
+                    + 1;
+                report.exact_guidance_rank[layer] = Some(
+                    report.exact_guidance_rank[layer].map_or(rank, |existing| existing.min(rank)),
+                );
+                let gap = ranked[0].1 - target_score;
+                report.exact_guidance_log_gap[layer] = Some(
+                    report.exact_guidance_log_gap[layer].map_or(gap, |existing| existing.min(gap)),
+                );
+            }
+        }
+    }
+
+    fn into_reports(self) -> Vec<ActiveTraceTargetReport> {
+        self.targets.into_iter().map(|(_, report)| report).collect()
+    }
 }
 
 /// Immutable data shared by every pass of one context search.
@@ -195,7 +680,8 @@ struct SearchInputs<'a> {
     problem: ScoringProblem,
     parameters: Parameters,
     options: TopKOptions,
-    anchor_slots: HashMap<u32, usize>,
+    prepared_factor_scorers: Vec<PreparedLocalScorer<'a>>,
+    anchor_layout: AnchorLayout,
 }
 
 impl SearchInputs<'_> {
@@ -214,21 +700,53 @@ impl SearchInputs<'_> {
 struct SearchScratch {
     candidate_cache: CandidateCache,
     factor_map_cache: FactorMapCache,
+    factor_map_ranked: Vec<(f64, usize)>,
     local_scores: LocalScoreCache,
     report: TopKReport,
+    active_trace: Option<ActiveTrace>,
 }
 
 impl SearchScratch {
-    fn new() -> Self {
+    fn new(profile: bool, active_trace: Option<ActiveTrace>) -> Self {
         Self {
             candidate_cache: CandidateCache::default(),
             factor_map_cache: FactorMapCache::default(),
-            local_scores: LocalScoreCache::default(),
+            factor_map_ranked: Vec::new(),
+            local_scores: LocalScoreCache::new(profile),
             report: TopKReport {
                 contexts: 1,
                 ..TopKReport::default()
             },
+            active_trace,
         }
+    }
+
+    fn into_report(mut self) -> TopKReport {
+        if let Some(trace) = self.active_trace.take() {
+            self.report.active_trace_targets = trace.into_reports();
+        }
+        self.report.factor_map_previous_hits = self.factor_map_cache.previous_hits;
+        self.report.factor_map_previous_builds = self.factor_map_cache.previous_builds;
+        self.report.factor_map_current_hits = self.factor_map_cache.current_hits;
+        self.report.factor_map_current_builds = self.factor_map_cache.current_builds;
+        self.report.factor_map_next_hits = self.factor_map_cache.next_hits;
+        self.report.factor_map_next_builds = self.factor_map_cache.next_builds;
+        self.report.factor_map_previous_destination_scans =
+            self.factor_map_cache.previous_destination_scans;
+        self.report.factor_map_current_destination_scans =
+            self.factor_map_cache.current_destination_scans;
+        self.report.factor_map_next_destination_scans =
+            self.factor_map_cache.next_destination_scans;
+        self.report.factor_map_previous_feasible_entries =
+            self.factor_map_cache.previous_feasible_entries;
+        self.report.factor_map_current_feasible_entries =
+            self.factor_map_cache.current_feasible_entries;
+        self.report.factor_map_next_feasible_entries = self.factor_map_cache.next_feasible_entries;
+        self.report.reverse_prefix_partial_calls =
+            self.factor_map_cache.reverse_prefix_partial_calls;
+        self.report.local_score_cache_hits = self.local_scores.hits;
+        self.report.local_score_cache_builds = self.local_scores.builds;
+        self.report
     }
 }
 
@@ -237,25 +755,52 @@ impl TopKReport {
         self.contexts += other.contexts;
         self.forward_candidate_evaluations += other.forward_candidate_evaluations;
         self.backward_candidate_evaluations += other.backward_candidate_evaluations;
-        self.surface_proposal_evaluations += other.surface_proposal_evaluations;
         self.factor_map_destination_evaluations += other.factor_map_destination_evaluations;
+        self.factor_map_previous_hits += other.factor_map_previous_hits;
+        self.factor_map_previous_builds += other.factor_map_previous_builds;
+        self.factor_map_current_hits += other.factor_map_current_hits;
+        self.factor_map_current_builds += other.factor_map_current_builds;
+        self.factor_map_next_hits += other.factor_map_next_hits;
+        self.factor_map_next_builds += other.factor_map_next_builds;
+        self.factor_map_previous_destination_scans += other.factor_map_previous_destination_scans;
+        self.factor_map_current_destination_scans += other.factor_map_current_destination_scans;
+        self.factor_map_next_destination_scans += other.factor_map_next_destination_scans;
+        self.factor_map_previous_feasible_entries += other.factor_map_previous_feasible_entries;
+        self.factor_map_current_feasible_entries += other.factor_map_current_feasible_entries;
+        self.factor_map_next_feasible_entries += other.factor_map_next_feasible_entries;
+        self.reverse_prefix_partial_calls += other.reverse_prefix_partial_calls;
+        self.local_score_cache_hits += other.local_score_cache_hits;
+        self.local_score_cache_builds += other.local_score_cache_builds;
         self.continuation_proposals += other.continuation_proposals;
         self.seam_refresh_proposals += other.seam_refresh_proposals;
         self.seam_refresh_states += other.seam_refresh_states;
+        self.pricing_candidate_evaluations += other.pricing_candidate_evaluations;
+        self.pricing_feasible_evaluations += other.pricing_feasible_evaluations;
+        self.pricing_plans_added += other.pricing_plans_added;
+        self.pricing_pair_evaluations += other.pricing_pair_evaluations;
+        self.pricing_pair_feasible_evaluations += other.pricing_pair_feasible_evaluations;
+        self.pricing_pair_plans_added += other.pricing_pair_plans_added;
+        self.pricing_pair_probes += other.pricing_pair_probes;
+        self.pricing_pair_expansions += other.pricing_pair_expansions;
+        self.pricing_pair_probe_reports
+            .extend(other.pricing_pair_probe_reports.iter().cloned());
+        self.pricing_rounds += other.pricing_rounds;
         self.stitch_pairs += other.stitch_pairs;
         self.completed_plans += other.completed_plans;
-        self.infeasible_contexts += other.infeasible_contexts;
+        self.contexts_without_plan += other.contexts_without_plan;
         self.build_problem_ns += other.build_problem_ns;
         self.backward_search_ns += other.backward_search_ns;
         self.backward_guidance_ns += other.backward_guidance_ns;
         self.forward_search_ns += other.forward_search_ns;
         self.continuation_guidance_ns += other.continuation_guidance_ns;
-        self.surface_proposal_ns += other.surface_proposal_ns;
         self.factor_map_ns += other.factor_map_ns;
         self.seam_refresh_ns += other.seam_refresh_ns;
+        self.pricing_ns += other.pricing_ns;
         self.stitch_ns += other.stitch_ns;
         self.materialize_ns += other.materialize_ns;
         self.total_search_ns += other.total_search_ns;
+        self.active_trace_targets
+            .extend(other.active_trace_targets.iter().cloned());
     }
 }
 
@@ -380,1323 +925,4 @@ fn best_continuation_score(
     best.is_finite().then_some(best)
 }
 
-struct FactorMapRequest<'a> {
-    layer: usize,
-    previous_zone: Option<usize>,
-    origin: usize,
-    suffixes: &'a [usize],
-    anchor_slot: Option<usize>,
-    anchors: &'a [Option<usize>],
-    candidate_limit: usize,
-}
-
-/// Build exact, destination-resolution utility maps for every activity factor
-/// affected by choosing a forward destination. Missing entries are infeasible;
-/// no sentinel values are introduced. This is an experimental alternative to
-/// the binned surface: it ranks the intersection of the three maps directly.
-fn factor_map_candidates(
-    inputs: &SearchInputs<'_>,
-    request: FactorMapRequest<'_>,
-    suffix_nodes: &[SuffixNode],
-    maps: &mut FactorMapCache,
-) -> Result<Vec<usize>, SamplerError> {
-    if let Some(zone) = request.anchor_slot.and_then(|slot| request.anchors[slot]) {
-        return Ok(vec![zone]);
-    }
-    let step = inputs.context.steps[request.layer];
-    if let Some(fixed) = step.fixed_destination {
-        return Ok(vec![inputs.graph.zone_index[&fixed]]);
-    }
-    let domain =
-        inputs
-            .destinations
-            .domain(step.activity_id)
-            .ok_or(SamplerError::NoFeasibleSequence {
-                context_id: inputs.context.context_id,
-                origin: inputs.context.initial_zone,
-            })?;
-    let zone_count = inputs.graph.zone_ids.len();
-    let initial_previous_map;
-    let previous_map = if let Some(previous_zone) = request.previous_zone {
-        maps.previous
-            .entry((request.layer - 1, previous_zone, request.origin))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] = score_local_weight(
-                        inputs.scoring(),
-                        request.layer - 1,
-                        previous_zone,
-                        request.origin,
-                        Some(destination),
-                    );
-                }
-                map
-            })
-    } else {
-        initial_previous_map =
-            domain
-                .iter()
-                .fold(vec![None; zone_count], |mut map, &destination| {
-                    map[destination] = initial_endpoint_score(
-                        inputs.graph,
-                        inputs.destinations,
-                        inputs.context,
-                        destination,
-                        inputs.parameters,
-                    )
-                    .map(|_| 0.0);
-                    map
-                });
-        &initial_previous_map
-    };
-    let compare = |left: &(f64, usize), right: &(f64, usize)| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-    };
-    let mut result = Vec::with_capacity(request.candidate_limit * request.suffixes.len());
-    for &suffix_index in request.suffixes {
-        let suffix = &suffix_nodes[suffix_index];
-        let next_zone = suffix.zone;
-        let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
-        let current_map = maps
-            .current
-            .entry((request.layer, request.origin, next_zone))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] = score_local_weight(
-                        inputs.scoring(),
-                        request.layer,
-                        request.origin,
-                        destination,
-                        Some(next_zone),
-                    );
-                }
-                map
-            });
-        let next_map = maps
-            .next
-            .entry((request.layer + 1, next_zone, next_next_zone))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] = score_local_weight(
-                        inputs.scoring(),
-                        request.layer + 1,
-                        destination,
-                        next_zone,
-                        next_next_zone,
-                    );
-                }
-                map
-            });
-        let mut ranked = domain
-            .iter()
-            .filter_map(|&destination| {
-                Some((
-                    previous_map[destination]? + current_map[destination]? + next_map[destination]?,
-                    destination,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if ranked.len() > request.candidate_limit {
-            ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
-            ranked.truncate(request.candidate_limit);
-        }
-        result.extend(ranked.into_iter().map(|(_, destination)| destination));
-    }
-    Ok(result)
-}
-
-/// Use maps whose terms are available from one leg to shortlist candidates,
-/// then apply the full ternary scorer only to that shortlist.  The partial
-/// terms never decide feasibility or a retained beam score.
-fn partial_screen_candidates(
-    inputs: &SearchInputs<'_>,
-    request: FactorMapRequest<'_>,
-    suffix_nodes: &[SuffixNode],
-    maps: &mut FactorMapCache,
-) -> Result<Vec<usize>, SamplerError> {
-    if let Some(zone) = request.anchor_slot.and_then(|slot| request.anchors[slot]) {
-        return Ok(vec![zone]);
-    }
-    let step = inputs.context.steps[request.layer];
-    if let Some(fixed) = step.fixed_destination {
-        return Ok(vec![inputs.graph.zone_index[&fixed]]);
-    }
-    let domain =
-        inputs
-            .destinations
-            .domain(step.activity_id)
-            .ok_or(SamplerError::NoFeasibleSequence {
-                context_id: inputs.context.context_id,
-                origin: inputs.context.initial_zone,
-            })?;
-    let zone_count = inputs.graph.zone_ids.len();
-    let initial_previous_map;
-    let previous_map = if let Some(previous_zone) = request.previous_zone {
-        maps.previous
-            .entry((request.layer - 1, previous_zone, request.origin))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] = score_local_weight(
-                        inputs.scoring(),
-                        request.layer - 1,
-                        previous_zone,
-                        request.origin,
-                        Some(destination),
-                    );
-                }
-                map
-            })
-    } else {
-        initial_previous_map =
-            domain
-                .iter()
-                .fold(vec![None; zone_count], |mut map, &destination| {
-                    map[destination] = initial_endpoint_score(
-                        inputs.graph,
-                        inputs.destinations,
-                        inputs.context,
-                        destination,
-                        inputs.parameters,
-                    )
-                    .map(|_| 0.0);
-                    map
-                });
-        &initial_previous_map
-    };
-    let current_partial = maps
-        .partial_current
-        .entry((request.layer, request.origin))
-        .or_insert_with(|| {
-            let mut map = vec![None; zone_count];
-            for &destination in domain {
-                map[destination] = score_inbound_partial(
-                    inputs.scoring(),
-                    request.layer,
-                    request.origin,
-                    destination,
-                );
-            }
-            map
-        });
-    let compare = |left: &(f64, usize), right: &(f64, usize)| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-    };
-    let screen_limit = request.candidate_limit.saturating_mul(8);
-    let mut result = Vec::with_capacity(request.candidate_limit * request.suffixes.len());
-    for &suffix_index in request.suffixes {
-        let suffix = &suffix_nodes[suffix_index];
-        let next_zone = suffix.zone;
-        let next_next_zone = suffix.next.map(|index| suffix_nodes[index].zone);
-        let next_partial = maps
-            .partial_next
-            .entry((request.layer + 1, next_zone))
-            .or_insert_with(|| {
-                let mut map = vec![None; zone_count];
-                for &destination in domain {
-                    map[destination] = score_inbound_partial(
-                        inputs.scoring(),
-                        request.layer + 1,
-                        destination,
-                        next_zone,
-                    );
-                }
-                map
-            });
-        let mut screened = domain
-            .iter()
-            .filter_map(|&destination| {
-                Some((
-                    previous_map[destination]?
-                        + current_partial[destination]?
-                        + next_partial[destination]?,
-                    destination,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if screened.len() > screen_limit {
-            screened.select_nth_unstable_by(screen_limit - 1, compare);
-            screened.truncate(screen_limit);
-        }
-        let mut ranked = screened
-            .into_iter()
-            .filter_map(|(_, destination)| {
-                Some((
-                    previous_map[destination]?
-                        + score_local_weight(
-                            inputs.scoring(),
-                            request.layer,
-                            request.origin,
-                            destination,
-                            Some(next_zone),
-                        )?
-                        + score_local_weight(
-                            inputs.scoring(),
-                            request.layer + 1,
-                            destination,
-                            next_zone,
-                            next_next_zone,
-                        )?,
-                    destination,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if ranked.len() > request.candidate_limit {
-            ranked.select_nth_unstable_by(request.candidate_limit - 1, compare);
-            ranked.truncate(request.candidate_limit);
-        }
-        result.extend(ranked.into_iter().map(|(_, destination)| destination));
-    }
-    Ok(result)
-}
-
-fn forward_beam(
-    inputs: &SearchInputs<'_>,
-    scratch: &mut SearchScratch,
-    stitch_layer: usize,
-    backward: &BackwardMessages,
-) -> Result<(Vec<PrefixNode>, Vec<usize>), SamplerError> {
-    let graph = inputs.graph;
-    let destinations = inputs.destinations;
-    let context = inputs.context;
-    let parameters = inputs.parameters;
-    let beam_width = inputs.options.frontier_width;
-    let candidate_count = inputs.options.proposal_limit_per_source;
-    let anchor_slots = &inputs.anchor_slots;
-    let continuation_state_limit = inputs.options.continuation_state_limit;
-    let continuation_proposal_limit = inputs.options.continuation_proposal_limit;
-    let factor_map_guidance_limit = continuation_state_limit.max(4);
-    let profile = inputs.options.profile;
-    let candidate_cache = &mut scratch.candidate_cache;
-    let factor_map_cache = &mut scratch.factor_map_cache;
-    let local_scores = &mut scratch.local_scores;
-    let report = &mut scratch.report;
-    let candidate_inputs = CandidateInputs {
-        graph,
-        destinations,
-        context,
-        scoring: inputs.scoring(),
-        candidate_count,
-        surface_bins: inputs.options.surface_bins,
-        exploration_seed: inputs.options.exploration_seed,
-    };
-    let started = profile.then(Instant::now);
-    let home = graph.zone_index[&context.initial_zone];
-    let mut nodes = vec![PrefixNode {
-        parent: None,
-        zone: home,
-        exact_log_weight: 0.0,
-        anchors: vec![None; anchor_slots.len()],
-    }];
-    let mut frontier = vec![0];
-    for layer in 0..=stitch_layer {
-        let mut children = Vec::new();
-        let mut scores = Vec::new();
-        let mut pairs = Vec::new();
-        for (state_index, &parent_index) in frontier.iter().enumerate() {
-            let parent = &nodes[parent_index];
-            let candidate_slot = context.steps[layer]
-                .anchor_id
-                .and_then(|anchor| anchor_slots.get(&anchor).copied());
-            let query = CandidateQuery {
-                layer,
-                reference_zone: parent.zone,
-                reverse: false,
-                state_index,
-                anchor_slot: candidate_slot,
-                anchors: &parent.anchors,
-            };
-            let guidance_suffixes = backward
-                .guidance_frontiers
-                .get(layer + 1)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let guidance_suffix = guidance_suffixes.first().copied();
-            let unassigned = candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none());
-            let previous_zone = if layer == 0 {
-                None
-            } else if layer == 1 {
-                Some(home)
-            } else {
-                Some(nodes[parent.parent.expect("non-root forward parent")].zone)
-            };
-            let mut candidate_zones = match (inputs.options.candidate_strategy, guidance_suffix) {
-                (CandidateStrategy::Surface, Some(suffix_index)) if unassigned => {
-                    let surface_started = profile.then(Instant::now);
-                    if context.steps[layer].fixed_destination.is_none() {
-                        report.surface_proposal_evaluations += destinations
-                            .domain(context.steps[layer].activity_id)
-                            .map_or(0, |domain| domain.len() as u64);
-                    }
-                    let result = surface_candidates(
-                        candidate_inputs,
-                        query,
-                        backward.nodes[suffix_index].zone,
-                    )?;
-                    if let Some(started) = surface_started {
-                        report.surface_proposal_ns += started.elapsed().as_nanos() as u64;
-                    }
-                    result
-                }
-                (CandidateStrategy::FactorMap | CandidateStrategy::PartialScreen, Some(_))
-                    if unassigned =>
-                {
-                    let map_started = profile.then(Instant::now);
-                    let factor_suffixes = if backward.frontiers[layer + 1].is_empty() {
-                        guidance_suffixes
-                    } else {
-                        &backward.frontiers[layer + 1]
-                    };
-                    let map_count = factor_suffixes.len().min(factor_map_guidance_limit);
-                    if context.steps[layer].fixed_destination.is_none() {
-                        report.factor_map_destination_evaluations += destinations
-                            .domain(context.steps[layer].activity_id)
-                            .map_or(0, |domain| domain.len() as u64 * map_count as u64);
-                    }
-                    let per_map_limit = inputs
-                        .options
-                        .proposal_limit_per_source
-                        .saturating_mul(2)
-                        .div_ceil(map_count);
-                    let mut result = Vec::with_capacity(per_map_limit * map_count);
-                    let request = FactorMapRequest {
-                        layer,
-                        previous_zone,
-                        origin: parent.zone,
-                        suffixes: &factor_suffixes[..map_count],
-                        anchor_slot: candidate_slot,
-                        anchors: &parent.anchors,
-                        candidate_limit: per_map_limit,
-                    };
-                    result.extend(
-                        if inputs.options.candidate_strategy == CandidateStrategy::FactorMap {
-                            factor_map_candidates(
-                                inputs,
-                                request,
-                                &backward.nodes,
-                                factor_map_cache,
-                            )?
-                        } else {
-                            partial_screen_candidates(
-                                inputs,
-                                request,
-                                &backward.nodes,
-                                factor_map_cache,
-                            )?
-                        },
-                    );
-                    if let Some(started) = map_started {
-                        report.factor_map_ns += started.elapsed().as_nanos() as u64;
-                    }
-                    result
-                }
-                _ => candidates(candidate_inputs, query, candidate_cache)?,
-            };
-            let proposal_guidance_started = profile.then(Instant::now);
-            if candidate_slot.is_none_or(|slot| parent.anchors[slot].is_none()) {
-                if let Some(suffix_frontier) = backward.guidance_frontiers.get(layer + 1) {
-                    for &suffix_index in suffix_frontier.iter().take(continuation_state_limit) {
-                        let projections = reverse_projection_candidates(
-                            graph,
-                            destinations,
-                            context,
-                            layer,
-                            backward.nodes[suffix_index].zone,
-                            continuation_proposal_limit,
-                            candidate_cache,
-                        )?;
-                        report.continuation_proposals += projections.len() as u64;
-                        candidate_zones.extend(projections);
-                    }
-                }
-            }
-            candidate_zones.sort_unstable();
-            candidate_zones.dedup();
-            if let Some(started) = proposal_guidance_started {
-                report.continuation_guidance_ns += started.elapsed().as_nanos() as u64;
-            }
-            for candidate in candidate_zones {
-                report.forward_candidate_evaluations += 1;
-                let local_score = if layer == 0 {
-                    initial_endpoint_score(graph, destinations, context, candidate, parameters)
-                } else {
-                    local_scores.score(
-                        inputs.scoring(),
-                        layer - 1,
-                        previous_zone.expect("non-initial layer has a previous destination"),
-                        parent.zone,
-                        Some(candidate),
-                    )
-                };
-                if let Some(local_score) = local_score {
-                    let prefix_score = if layer == 0 {
-                        0.0
-                    } else {
-                        parent.exact_log_weight + local_score
-                    };
-                    let continuation_started = profile.then(Instant::now);
-                    let continuation_score = backward
-                        .guidance_frontiers
-                        .get(layer + 1)
-                        .filter(|_| continuation_state_limit > 0)
-                        .and_then(|suffix_frontier| {
-                            best_continuation_score(
-                                inputs,
-                                ContinuationCandidate {
-                                    layer,
-                                    previous_zone: parent.zone,
-                                    destination: candidate,
-                                    prefix_anchors: &parent.anchors,
-                                    anchor_slot: candidate_slot,
-                                },
-                                &backward.nodes,
-                                &suffix_frontier
-                                    [..suffix_frontier.len().min(continuation_state_limit)],
-                                local_scores,
-                            )
-                        });
-                    if let Some(started) = continuation_started {
-                        report.continuation_guidance_ns += started.elapsed().as_nanos() as u64;
-                    }
-                    children.push((
-                        parent_index,
-                        candidate,
-                        if layer == 0 { 0.0 } else { local_score },
-                    ));
-                    pairs.push((parent.zone, candidate));
-                    scores.push(
-                        continuation_score
-                            .map(|score| prefix_score + score)
-                            .unwrap_or_else(|| {
-                                if layer == 0 {
-                                    local_score
-                                } else {
-                                    prefix_score
-                                }
-                            }),
-                    );
-                }
-            }
-        }
-        if children.is_empty() {
-            frontier.clear();
-            break;
-        }
-        let retained = retain_pair_alternatives(
-            &scores,
-            &pairs,
-            (inputs.options.result_limit as usize).min(beam_width),
-        );
-        let children = retained
-            .iter()
-            .map(|&index| children[index])
-            .collect::<Vec<_>>();
-        let scores = retained
-            .iter()
-            .map(|&index| scores[index])
-            .collect::<Vec<_>>();
-        frontier = select_beam_indices(&scores, beam_width)
-            .into_iter()
-            .map(|index| {
-                let (parent_index, destination, exact_increment) = children[index];
-                let node_index = nodes.len();
-                let mut anchors = nodes[parent_index].anchors.clone();
-                if let Some(anchor) = context.steps[layer].anchor_id {
-                    anchors[anchor_slots[&anchor]] = Some(destination);
-                }
-                nodes.push(PrefixNode {
-                    parent: Some(parent_index),
-                    zone: destination,
-                    exact_log_weight: nodes[parent_index].exact_log_weight + exact_increment,
-                    anchors,
-                });
-                node_index
-            })
-            .collect();
-    }
-    if let Some(started) = started {
-        report.forward_search_ns += started.elapsed().as_nanos() as u64;
-    }
-    Ok((nodes, frontier))
-}
-
-/// Add a small set of suffix boundary states proposed from the retained forward
-/// frontier. The original backward frontier remains intact: this is a bounded
-/// F-to-B seam refresh, not a replacement of reverse candidate generation.
-struct RefreshSuffixRequest<'a> {
-    prefix_anchors: &'a [Option<usize>],
-    candidate_slot: Option<usize>,
-    candidate: usize,
-    refresh_layer: usize,
-    downstream: &'a [usize],
-    messages: &'a BackwardMessages,
-}
-
-fn best_refresh_suffix(
-    inputs: &SearchInputs<'_>,
-    local_scores: &mut LocalScoreCache,
-    request: RefreshSuffixRequest<'_>,
-    unanchored_values: &mut HashMap<usize, Option<(usize, f64, f64)>>,
-) -> Option<(usize, f64, f64)> {
-    if inputs.anchor_slots.is_empty() {
-        if let Some(value) = unanchored_values.get(&request.candidate) {
-            return *value;
-        }
-    }
-    let mut best = None;
-    for &next_index in request.downstream {
-        let next = &request.messages.nodes[next_index];
-        if !inputs.anchor_slots.is_empty()
-            && !candidate_anchors_compatible(
-                request.prefix_anchors,
-                &next.anchors,
-                request.candidate_slot,
-                request.candidate,
-            )
-        {
-            continue;
-        }
-        let Some(local_score) = local_scores.score(
-            inputs.scoring(),
-            request.refresh_layer + 1,
-            request.candidate,
-            next.zone,
-            next.next.map(|index| request.messages.nodes[index].zone),
-        ) else {
-            continue;
-        };
-        let suffix_score = next.exact_log_weight + local_score;
-        if best.is_none_or(|(_, _, score)| suffix_score > score) {
-            best = Some((next_index, local_score, suffix_score));
-        }
-    }
-    if inputs.anchor_slots.is_empty() {
-        unanchored_values.insert(request.candidate, best);
-    }
-    best
-}
-
-fn refresh_stitch_frontier(
-    inputs: &SearchInputs<'_>,
-    scratch: &mut SearchScratch,
-    stitch_layer: usize,
-    prefix_nodes: &[PrefixNode],
-    prefix_frontier: &[usize],
-    messages: &mut BackwardMessages,
-) -> Result<(), SamplerError> {
-    let graph = inputs.graph;
-    let destinations = inputs.destinations;
-    let context = inputs.context;
-    let candidate_count = inputs.options.proposal_limit_per_source;
-    let refresh_per_prefix = inputs.options.seam_refresh_per_prefix;
-    let anchor_slots = &inputs.anchor_slots;
-    let profile = inputs.options.profile;
-    let candidate_cache = &mut scratch.candidate_cache;
-    let local_scores = &mut scratch.local_scores;
-    let report = &mut scratch.report;
-    let candidate_inputs = CandidateInputs {
-        graph,
-        destinations,
-        context,
-        scoring: inputs.scoring(),
-        candidate_count,
-        surface_bins: inputs.options.surface_bins,
-        exploration_seed: inputs.options.exploration_seed,
-    };
-    if refresh_per_prefix == 0 {
-        return Ok(());
-    }
-    let refresh_layer = stitch_layer + 1;
-    if refresh_layer + 1 >= context.steps.len() {
-        // The stitch suffix is the fixed terminal destination, so there is no
-        // activity destination to refresh.
-        return Ok(());
-    }
-    let started = profile.then(Instant::now);
-    let home = graph.zone_index[&context.initial_zone];
-    let downstream = messages.frontiers[refresh_layer + 1].clone();
-    if downstream.is_empty() {
-        return Ok(());
-    }
-
-    let mut existing = messages.frontiers[refresh_layer]
-        .iter()
-        .map(|&index| {
-            let node = &messages.nodes[index];
-            (node.zone, node.next.expect("non-terminal stitch suffix"))
-        })
-        .collect::<BTreeSet<_>>();
-    let mut additions = Vec::new();
-    let mut unanchored_suffix_values = HashMap::<usize, Option<(usize, f64, f64)>>::new();
-    for (state_index, &prefix_index) in prefix_frontier.iter().enumerate() {
-        let prefix = &prefix_nodes[prefix_index];
-        let candidate_slot = context.steps[refresh_layer]
-            .anchor_id
-            .and_then(|anchor| anchor_slots.get(&anchor).copied());
-        let mut ranked = Vec::new();
-        for candidate in candidates(
-            candidate_inputs,
-            CandidateQuery {
-                layer: refresh_layer,
-                reference_zone: prefix.zone,
-                reverse: false,
-                state_index,
-                anchor_slot: candidate_slot,
-                anchors: &prefix.anchors,
-            },
-            candidate_cache,
-        )? {
-            report.seam_refresh_proposals += 1;
-            let best = best_refresh_suffix(
-                inputs,
-                local_scores,
-                RefreshSuffixRequest {
-                    prefix_anchors: &prefix.anchors,
-                    candidate_slot,
-                    candidate,
-                    refresh_layer,
-                    downstream: &downstream,
-                    messages,
-                },
-                &mut unanchored_suffix_values,
-            );
-            let Some((next_index, local_score, suffix_score)) = best else {
-                continue;
-            };
-            let prefix_previous = if stitch_layer == 0 {
-                home
-            } else {
-                prefix_nodes[prefix.parent.expect("non-root stitch prefix")].zone
-            };
-            let Some(boundary_score) = local_scores.score(
-                inputs.scoring(),
-                stitch_layer,
-                prefix_previous,
-                prefix.zone,
-                Some(candidate),
-            ) else {
-                continue;
-            };
-            ranked.push((
-                prefix.exact_log_weight + boundary_score + suffix_score,
-                candidate,
-                next_index,
-                local_score,
-            ));
-        }
-        let compare = |left: &(f64, usize, usize, f64), right: &(f64, usize, usize, f64)| {
-            right
-                .0
-                .total_cmp(&left.0)
-                .then_with(|| left.1.cmp(&right.1))
-                .then_with(|| left.2.cmp(&right.2))
-        };
-        if ranked.len() > refresh_per_prefix {
-            ranked.select_nth_unstable_by(refresh_per_prefix - 1, compare);
-            ranked.truncate(refresh_per_prefix);
-        }
-        ranked.sort_unstable_by(compare);
-        for (_, candidate, next_index, local_score) in ranked {
-            if !existing.insert((candidate, next_index)) {
-                continue;
-            }
-            additions.push((candidate, next_index, local_score));
-        }
-    }
-    for (candidate, next_index, local_score) in additions {
-        let node_index = messages.nodes.len();
-        let mut anchors = messages.nodes[next_index].anchors.clone();
-        if let Some(anchor) = context.steps[refresh_layer].anchor_id {
-            anchors[anchor_slots[&anchor]] = Some(candidate);
-        }
-        messages.nodes.push(SuffixNode {
-            next: Some(next_index),
-            zone: candidate,
-            exact_log_weight: messages.nodes[next_index].exact_log_weight + local_score,
-            anchors,
-        });
-        messages.frontiers[refresh_layer].push(node_index);
-        report.seam_refresh_states += 1;
-    }
-    if let Some(started) = started {
-        report.seam_refresh_ns += started.elapsed().as_nanos() as u64;
-    }
-    Ok(())
-}
-
-fn backward_beam(
-    inputs: &SearchInputs<'_>,
-    scratch: &mut SearchScratch,
-    first_layer: usize,
-) -> Result<BackwardMessages, SamplerError> {
-    let graph = inputs.graph;
-    let destinations = inputs.destinations;
-    let context = inputs.context;
-    let beam_width = inputs.options.frontier_width;
-    let candidate_count = inputs.options.proposal_limit_per_source;
-    let anchor_slots = &inputs.anchor_slots;
-    let profile = inputs.options.profile;
-    let candidate_cache = &mut scratch.candidate_cache;
-    let local_scores = &mut scratch.local_scores;
-    let report = &mut scratch.report;
-    let candidate_inputs = CandidateInputs {
-        graph,
-        destinations,
-        context,
-        scoring: inputs.scoring(),
-        candidate_count,
-        surface_bins: inputs.options.surface_bins,
-        exploration_seed: inputs.options.exploration_seed,
-    };
-    let started = profile.then(Instant::now);
-    let terminal = context.steps.last().expect("context has steps");
-    let terminal_zone = terminal.fixed_destination.ok_or_else(|| {
-        SamplerError::InvalidInput(format!(
-            "context {} needs a fixed terminal destination for bidirectional top-K search",
-            context.context_id
-        ))
-    })?;
-    let mut nodes = vec![SuffixNode {
-        next: None,
-        zone: graph.zone_index[&terminal_zone],
-        exact_log_weight: 0.0,
-        anchors: vec![None; anchor_slots.len()],
-    }];
-    let mut frontier = vec![0];
-    let terminal_layer = context.steps.len() - 1;
-    let mut frontiers = vec![Vec::new(); context.steps.len()];
-    frontiers[terminal_layer] = frontier.clone();
-    for layer in (first_layer..terminal_layer).rev() {
-        let mut children = Vec::new();
-        let mut scores = Vec::new();
-        let mut pairs = Vec::new();
-        for (state_index, &next_index) in frontier.iter().enumerate() {
-            let next = &nodes[next_index];
-            let next_zone = next.zone;
-            let query = CandidateQuery {
-                layer,
-                reference_zone: next_zone,
-                reverse: true,
-                state_index,
-                anchor_slot: context.steps[layer]
-                    .anchor_id
-                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
-                anchors: &next.anchors,
-            };
-            let next_next_zone = next.next.map(|index| nodes[index].zone);
-            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
-            for candidate in reverse_candidates {
-                report.backward_candidate_evaluations += 1;
-                let score = local_scores.score(
-                    inputs.scoring(),
-                    layer + 1,
-                    candidate,
-                    next_zone,
-                    next_next_zone,
-                );
-                if let Some(score) = score {
-                    children.push((next_index, candidate, score));
-                    pairs.push((candidate, next_zone));
-                    scores.push(next.exact_log_weight + score);
-                }
-            }
-        }
-        if children.is_empty() {
-            frontier.clear();
-            break;
-        }
-        let retained = retain_pair_alternatives(
-            &scores,
-            &pairs,
-            (inputs.options.result_limit as usize).min(beam_width),
-        );
-        let children = retained
-            .iter()
-            .map(|&index| children[index])
-            .collect::<Vec<_>>();
-        let scores = retained
-            .iter()
-            .map(|&index| scores[index])
-            .collect::<Vec<_>>();
-        frontier = select_beam_indices(&scores, beam_width)
-            .into_iter()
-            .map(|index| {
-                let (next_index, destination, exact_increment) = children[index];
-                let node_index = nodes.len();
-                let mut anchors = nodes[next_index].anchors.clone();
-                if let Some(anchor) = context.steps[layer].anchor_id {
-                    anchors[anchor_slots[&anchor]] = Some(destination);
-                }
-                nodes.push(SuffixNode {
-                    next: Some(next_index),
-                    zone: destination,
-                    exact_log_weight: nodes[next_index].exact_log_weight + exact_increment,
-                    anchors,
-                });
-                node_index
-            })
-            .collect();
-        frontiers[layer] = frontier.clone();
-    }
-    if let Some(started) = started {
-        report.backward_search_ns += started.elapsed().as_nanos() as u64;
-    }
-    Ok(BackwardMessages {
-        nodes,
-        frontiers,
-        guidance_frontiers: vec![Vec::new(); context.steps.len()],
-    })
-}
-
-fn extend_backward_guidance(
-    inputs: &SearchInputs<'_>,
-    scratch: &mut SearchScratch,
-    stitch_layer: usize,
-    messages: &mut BackwardMessages,
-) -> Result<(), SamplerError> {
-    let graph = inputs.graph;
-    let destinations = inputs.destinations;
-    let context = inputs.context;
-    let guidance_width = if matches!(
-        inputs.options.candidate_strategy,
-        CandidateStrategy::FactorMap | CandidateStrategy::PartialScreen
-    ) {
-        inputs.options.continuation_state_limit.max(4)
-    } else {
-        inputs.options.continuation_state_limit
-    };
-    let candidate_count = inputs.options.proposal_limit_per_source;
-    let anchor_slots = &inputs.anchor_slots;
-    let profile = inputs.options.profile;
-    let candidate_cache = &mut scratch.candidate_cache;
-    let local_scores = &mut scratch.local_scores;
-    let report = &mut scratch.report;
-    let candidate_inputs = CandidateInputs {
-        graph,
-        destinations,
-        context,
-        scoring: inputs.scoring(),
-        candidate_count,
-        surface_bins: inputs.options.surface_bins,
-        exploration_seed: inputs.options.exploration_seed,
-    };
-    let started = profile.then(Instant::now);
-    let mut frontier = messages.frontiers[stitch_layer + 1]
-        .iter()
-        .copied()
-        .take(guidance_width)
-        .collect::<Vec<_>>();
-    messages.guidance_frontiers[stitch_layer + 1] = frontier.clone();
-    for layer in (0..=stitch_layer).rev() {
-        let mut children = Vec::new();
-        let mut scores = Vec::new();
-        let mut pairs = Vec::new();
-        for (state_index, &next_index) in frontier.iter().enumerate() {
-            let next = &messages.nodes[next_index];
-            let next_zone = next.zone;
-            let query = CandidateQuery {
-                layer,
-                reference_zone: next_zone,
-                reverse: true,
-                state_index,
-                anchor_slot: context.steps[layer]
-                    .anchor_id
-                    .and_then(|anchor| anchor_slots.get(&anchor).copied()),
-                anchors: &next.anchors,
-            };
-            let next_next_zone = next.next.map(|index| messages.nodes[index].zone);
-            let reverse_candidates = candidates(candidate_inputs, query, candidate_cache)?;
-            for candidate in reverse_candidates {
-                report.backward_candidate_evaluations += 1;
-                let score = local_scores.score(
-                    inputs.scoring(),
-                    layer + 1,
-                    candidate,
-                    next_zone,
-                    next_next_zone,
-                );
-                if let Some(score) = score {
-                    children.push((next_index, candidate, score));
-                    pairs.push((candidate, next_zone));
-                    scores.push(next.exact_log_weight + score);
-                }
-            }
-        }
-        if children.is_empty() {
-            frontier.clear();
-            break;
-        }
-        let retained = retain_pair_alternatives(
-            &scores,
-            &pairs,
-            (inputs.options.result_limit as usize).min(guidance_width),
-        );
-        let children = retained
-            .iter()
-            .map(|&index| children[index])
-            .collect::<Vec<_>>();
-        let scores = retained
-            .iter()
-            .map(|&index| scores[index])
-            .collect::<Vec<_>>();
-        frontier = select_beam_indices(&scores, guidance_width)
-            .into_iter()
-            .map(|index| {
-                let (next_index, destination, exact_increment) = children[index];
-                let node_index = messages.nodes.len();
-                let mut anchors = messages.nodes[next_index].anchors.clone();
-                if let Some(anchor) = context.steps[layer].anchor_id {
-                    anchors[anchor_slots[&anchor]] = Some(destination);
-                }
-                messages.nodes.push(SuffixNode {
-                    next: Some(next_index),
-                    zone: destination,
-                    exact_log_weight: messages.nodes[next_index].exact_log_weight + exact_increment,
-                    anchors,
-                });
-                node_index
-            })
-            .collect();
-        messages.guidance_frontiers[layer] = frontier.clone();
-    }
-    if let Some(started) = started {
-        report.backward_guidance_ns += started.elapsed().as_nanos() as u64;
-    }
-    Ok(())
-}
-
-fn prefix_zones(nodes: &[PrefixNode], mut index: usize) -> Vec<usize> {
-    let mut zones = Vec::new();
-    while let Some(parent) = nodes[index].parent {
-        zones.push(nodes[index].zone);
-        index = parent;
-    }
-    zones.reverse();
-    zones
-}
-
-fn suffix_zones(nodes: &[SuffixNode], mut index: usize) -> Vec<usize> {
-    let mut zones = Vec::new();
-    loop {
-        zones.push(nodes[index].zone);
-        let Some(next) = nodes[index].next else {
-            return zones;
-        };
-        index = next;
-    }
-}
-
-struct CompletedPlan {
-    score: f64,
-    prefix: usize,
-    suffix: usize,
-}
-
-fn append_plan(output: &mut OutputTable, inputs: &SearchInputs<'_>, zones: &[usize], draw_id: u32) {
-    let Some((_, local_weights)) = score_zones(inputs.scoring(), zones) else {
-        return;
-    };
-    let mut suffixes = vec![0.0; zones.len()];
-    let mut suffix = 0.0;
-    for layer in (0..zones.len()).rev() {
-        suffix += local_weights[layer];
-        suffixes[layer] = suffix;
-    }
-    let mut origin = inputs.graph.zone_index[&inputs.context.initial_zone];
-    for (layer, &destination) in zones.iter().enumerate() {
-        output.push(OutputRow {
-            context_id: inputs.context.context_id,
-            draw_id,
-            layer: layer as u32,
-            origin: inputs.graph.zone_ids[origin],
-            destination: inputs.graph.zone_ids[destination],
-            local_log_weight: local_weights[layer],
-            total_log_weight: suffixes[layer],
-        });
-        origin = destination;
-    }
-}
-
-fn search_two_step_context(
-    inputs: &SearchInputs<'_>,
-    scratch: &mut SearchScratch,
-) -> Result<OutputTable, SamplerError> {
-    let search_started = inputs.options.profile.then(Instant::now);
-    let terminal = inputs.context.steps[1];
-    let terminal_zone = terminal.fixed_destination.ok_or_else(|| {
-        SamplerError::InvalidInput(format!(
-            "context {} needs a fixed terminal destination for top-K search",
-            inputs.context.context_id
-        ))
-    })?;
-    let terminal = *inputs.graph.zone_index.get(&terminal_zone).ok_or_else(|| {
-        SamplerError::InvalidInput(format!(
-            "context {} terminal destination {} is absent from the OD graph",
-            inputs.context.context_id, terminal_zone
-        ))
-    })?;
-    let first = inputs.context.steps[0];
-    let candidates = if let Some(fixed) = first.fixed_destination {
-        vec![*inputs.graph.zone_index.get(&fixed).ok_or_else(|| {
-            SamplerError::InvalidInput(format!(
-                "context {} fixed destination {} is absent from the OD graph",
-                inputs.context.context_id, fixed
-            ))
-        })?]
-    } else {
-        inputs
-            .destinations
-            .domain(first.activity_id)
-            .ok_or(SamplerError::NoFeasibleSequence {
-                context_id: inputs.context.context_id,
-                origin: inputs.context.initial_zone,
-            })?
-            .to_vec()
-    };
-    let mut completed = Vec::with_capacity(candidates.len());
-    for destination in candidates {
-        scratch.report.forward_candidate_evaluations += 1;
-        let zones = vec![destination, terminal];
-        if let Some((score, _)) = score_zones(inputs.scoring(), &zones) {
-            completed.push((score, zones));
-        }
-    }
-    if let Some(started) = search_started {
-        scratch.report.forward_search_ns += started.elapsed().as_nanos() as u64;
-    }
-    if completed.is_empty() {
-        scratch.report.infeasible_contexts = 1;
-        return Err(SamplerError::NoFeasibleSequence {
-            context_id: inputs.context.context_id,
-            origin: inputs.context.initial_zone,
-        });
-    }
-    completed.sort_unstable_by(|left, right| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-    });
-    scratch.report.completed_plans = completed.len() as u64;
-    let materialize_started = inputs.options.profile.then(Instant::now);
-    let mut output = OutputTable::default();
-    for (draw, (_, zones)) in completed
-        .into_iter()
-        .take(inputs.options.result_limit as usize)
-        .enumerate()
-    {
-        append_plan(&mut output, inputs, &zones, draw as u32 + 1);
-    }
-    if let Some(started) = materialize_started {
-        scratch.report.materialize_ns += started.elapsed().as_nanos() as u64;
-    }
-    Ok(output)
-}
-
-fn search_context(
-    graph: &OdGraph,
-    destinations: &DestinationIndex,
-    context: &Context,
-    parameters: Parameters,
-    options: TopKOptions,
-) -> Result<(OutputTable, TopKReport), SamplerError> {
-    let started = options.profile.then(Instant::now);
-    if context.steps.len() < 2 {
-        return Err(SamplerError::InvalidInput(format!(
-            "context {} needs at least two steps for top-K search",
-            context.context_id
-        )));
-    }
-    let build_started = options.profile.then(Instant::now);
-    let problem = build_scoring_problem(context)?;
-    let use_heuristic = match options.candidate_strategy {
-        CandidateStrategy::Surface => context.steps.len() > 4,
-        CandidateStrategy::FactorMap => context.steps.len() > options.factor_map_max_depth,
-        CandidateStrategy::PartialScreen => context.steps.len() > options.factor_map_max_depth,
-        CandidateStrategy::Heuristic => false,
-    };
-    let options = if use_heuristic {
-        TopKOptions {
-            candidate_strategy: CandidateStrategy::Heuristic,
-            ..options
-        }
-    } else {
-        options
-    };
-    let inputs = SearchInputs {
-        graph,
-        destinations,
-        context,
-        problem,
-        parameters,
-        options,
-        anchor_slots: anchor_slots(context),
-    };
-    let mut scratch = SearchScratch::new();
-    if let Some(started) = build_started {
-        scratch.report.build_problem_ns += started.elapsed().as_nanos() as u64;
-    }
-    if inputs.context.steps.len() == 2 {
-        let output = search_two_step_context(&inputs, &mut scratch)?;
-        if let Some(started) = started {
-            scratch.report.total_search_ns += started.elapsed().as_nanos() as u64;
-        }
-        return Ok((output, scratch.report));
-    }
-    let balanced_stitch_layer = (inputs.context.steps.len() - 1) as i32 / 2;
-    let stitch_layer = (balanced_stitch_layer + inputs.options.stitch_bias)
-        .clamp(0, inputs.context.steps.len() as i32 - 2) as usize;
-    let backward = backward_beam(&inputs, &mut scratch, stitch_layer + 1)?;
-    let mut backward = backward;
-    extend_backward_guidance(&inputs, &mut scratch, stitch_layer, &mut backward)?;
-    let (prefix_nodes, forward) = forward_beam(&inputs, &mut scratch, stitch_layer, &backward)?;
-    refresh_stitch_frontier(
-        &inputs,
-        &mut scratch,
-        stitch_layer,
-        &prefix_nodes,
-        &forward,
-        &mut backward,
-    )?;
-    let stitch_started = inputs.options.profile.then(Instant::now);
-    let mut completed = Vec::new();
-    let home = inputs.graph.zone_index[&inputs.context.initial_zone];
-    for &prefix_index in &forward {
-        let prefix = &prefix_nodes[prefix_index];
-        let prefix_previous = if stitch_layer == 0 {
-            home
-        } else {
-            prefix_nodes[prefix.parent.expect("non-root forward frontier")].zone
-        };
-        for &suffix_index in &backward.frontiers[stitch_layer + 1] {
-            let suffix = &backward.nodes[suffix_index];
-            scratch.report.stitch_pairs += 1;
-            if !anchors_compatible(&prefix.anchors, &suffix.anchors) {
-                continue;
-            }
-            let boundary_score = scratch
-                .local_scores
-                .score(
-                    inputs.scoring(),
-                    stitch_layer,
-                    prefix_previous,
-                    prefix.zone,
-                    Some(suffix.zone),
-                )
-                .and_then(|left| {
-                    scratch
-                        .local_scores
-                        .score(
-                            inputs.scoring(),
-                            stitch_layer + 1,
-                            prefix.zone,
-                            suffix.zone,
-                            suffix.next.map(|index| backward.nodes[index].zone),
-                        )
-                        .map(|right| left + right)
-                });
-            if let Some(boundary_score) = boundary_score {
-                let score = prefix.exact_log_weight + suffix.exact_log_weight + boundary_score;
-                completed.push(CompletedPlan {
-                    score,
-                    prefix: prefix_index,
-                    suffix: suffix_index,
-                });
-            }
-        }
-    }
-    if completed.is_empty() {
-        scratch.report.infeasible_contexts = 1;
-        return Err(SamplerError::NoFeasibleSequence {
-            context_id: context.context_id,
-            origin: context.initial_zone,
-        });
-    }
-    completed.sort_unstable_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.prefix.cmp(&right.prefix))
-            .then_with(|| left.suffix.cmp(&right.suffix))
-    });
-    if let Some(started) = stitch_started {
-        scratch.report.stitch_ns += started.elapsed().as_nanos() as u64;
-    }
-    scratch.report.completed_plans = completed.len() as u64;
-    let mut output = OutputTable::default();
-    let mut seen = BTreeSet::new();
-    let materialize_started = inputs.options.profile.then(Instant::now);
-    for completed in completed {
-        let mut zones = prefix_zones(&prefix_nodes, completed.prefix);
-        zones.extend(suffix_zones(&backward.nodes, completed.suffix));
-        if !seen.insert(zones.clone()) {
-            continue;
-        }
-        append_plan(&mut output, &inputs, &zones, seen.len() as u32);
-        if seen.len() == inputs.options.result_limit as usize {
-            break;
-        }
-    }
-    if let Some(started) = materialize_started {
-        scratch.report.materialize_ns += started.elapsed().as_nanos() as u64;
-    }
-    if let Some(started) = started {
-        scratch.report.total_search_ns += started.elapsed().as_nanos() as u64;
-    }
-    Ok((output, scratch.report))
-}
-
-pub fn search_top_k_all(
-    graph: &OdGraph,
-    destinations: &DestinationIndex,
-    contexts: &[Context],
-    parameters: Parameters,
-    options: TopKOptions,
-    n_threads: Option<usize>,
-) -> Result<(OutputTable, TopKReport), SamplerError> {
-    let compute = || {
-        contexts
-            .par_iter()
-            .map(|context| search_context(graph, destinations, context, parameters, options))
-            .collect::<Vec<_>>()
-    };
-    let results = if let Some(n_threads) = n_threads {
-        if n_threads == 0 {
-            return Err(SamplerError::InvalidInput(
-                "n_threads must be positive".to_string(),
-            ));
-        }
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(n_threads)
-            .build()
-            .map_err(|error| SamplerError::InvalidInput(error.to_string()))?
-            .install(compute)
-    } else {
-        compute()
-    };
-    let mut output = OutputTable::default();
-    let mut report = TopKReport::default();
-    for result in results {
-        match result {
-            Ok((table, context_report)) => {
-                output.extend(table);
-                report.add(&context_report);
-            }
-            Err(SamplerError::NoFeasibleSequence { .. }) if parameters.skip_infeasible => {
-                report.contexts += 1;
-                report.infeasible_contexts += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok((output, report))
-}
+// Search passes are physically separated to keep task-scoped reads small.

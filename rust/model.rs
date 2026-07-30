@@ -10,6 +10,29 @@ pub struct Edge {
     pub time: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Travel {
+    cost: f64,
+    time: f64,
+}
+
+impl Travel {
+    #[inline]
+    fn edge(self, destination: usize) -> Option<Edge> {
+        self.cost.is_finite().then_some(Edge {
+            destination,
+            cost: self.cost,
+            time: self.time,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct DenseTravel {
+    forward: Vec<Travel>,
+    transpose: Vec<Travel>,
+}
+
 /// Shared sparse OD graph stored in compressed sparse row form.
 #[derive(Debug)]
 pub struct OdGraph {
@@ -21,10 +44,7 @@ pub struct OdGraph {
     outgoing_cost_edge_indices: Vec<u32>,
     incoming_offsets: Vec<usize>,
     incoming_cost_edge_indices: Vec<u32>,
-    outgoing_cost_bands: Vec<u8>,
-    outgoing_time_bands: Vec<u8>,
-    incoming_time_bands: Vec<u8>,
-    dense_edge_indices: Option<Vec<usize>>,
+    dense_travel: Option<DenseTravel>,
 }
 
 impl OdGraph {
@@ -128,64 +148,30 @@ impl OdGraph {
                 });
         }
 
-        let mut outgoing_cost_bands = vec![0; edges.len()];
-        let mut outgoing_time_bands = vec![0; edges.len()];
-        for origin in 0..zone_ids.len() {
-            let start = offsets[origin];
-            let end = offsets[origin + 1];
-            let count = end - start;
-            for (rank, &edge_index) in outgoing_cost_edge_indices[start..end].iter().enumerate() {
-                outgoing_cost_bands[edge_index as usize] = (4 * rank / count) as u8;
-            }
-            let mut by_time = (start..end).collect::<Vec<_>>();
-            by_time.sort_unstable_by(|&left, &right| {
-                edges[left]
-                    .time
-                    .total_cmp(&edges[right].time)
-                    .then_with(|| edges[left].destination.cmp(&edges[right].destination))
-            });
-            for (rank, edge_index) in by_time.into_iter().enumerate() {
-                outgoing_time_bands[edge_index] = (4 * rank / count) as u8;
-            }
-        }
-        let mut incoming_time_bands = vec![0; edges.len()];
-        for destination in 0..zone_ids.len() {
-            let edge_indices = &incoming_cost_edge_indices
-                [incoming_offsets[destination]..incoming_offsets[destination + 1]];
-            let count = edge_indices.len();
-            let mut by_time = edge_indices.to_vec();
-            by_time.sort_unstable_by(|&left, &right| {
-                let left = left as usize;
-                let right = right as usize;
-                edges[left]
-                    .time
-                    .total_cmp(&edges[right].time)
-                    .then_with(|| edge_origins[left].cmp(&edge_origins[right]))
-            });
-            for (rank, edge_index) in by_time.into_iter().enumerate() {
-                incoming_time_bands[edge_index as usize] = (4 * rank / count) as u8;
-            }
-        }
-
-        // Bounded search repeatedly looks up a small number of exact OD
-        // pairs. A dense index is cheap for near-complete matrices such as
-        // Grand Genève, while sparse regional or national graphs keep the CSR
-        // binary-search fallback.
         let dense_size = zone_ids.len().checked_mul(zone_ids.len());
-        let dense_edge_indices = dense_size
+        // Dense workloads use one authoritative point-lookup representation.
+        // Both orientations keep factor-map scans contiguous; sparse regional
+        // or national graphs retain the CSR binary-search fallback.
+        let dense_travel = dense_size
             .filter(|&size| size <= edges.len().saturating_mul(4))
             .map(|size| {
-                let mut indices = vec![usize::MAX; size];
+                let missing = Travel {
+                    cost: f64::NAN,
+                    time: f64::NAN,
+                };
+                let mut forward = vec![missing; size];
+                let mut transpose = vec![missing; size];
                 for origin in 0..zone_ids.len() {
-                    let start = offsets[origin];
-                    let end = offsets[origin + 1];
-                    for (relative_index, edge) in edges[start..end].iter().enumerate() {
-                        let edge_index = start + relative_index;
-                        let destination = edge.destination;
-                        indices[origin * zone_ids.len() + destination] = edge_index;
+                    for edge in &edges[offsets[origin]..offsets[origin + 1]] {
+                        let travel = Travel {
+                            cost: edge.cost,
+                            time: edge.time,
+                        };
+                        forward[origin * zone_ids.len() + edge.destination] = travel;
+                        transpose[edge.destination * zone_ids.len() + origin] = travel;
                     }
                 }
-                indices
+                DenseTravel { forward, transpose }
             });
 
         Ok(Self {
@@ -197,10 +183,7 @@ impl OdGraph {
             outgoing_cost_edge_indices,
             incoming_offsets,
             incoming_cost_edge_indices,
-            outgoing_cost_bands,
-            outgoing_time_bands,
-            incoming_time_bands,
-            dense_edge_indices,
+            dense_travel,
         })
     }
 
@@ -232,34 +215,87 @@ impl OdGraph {
 
     #[inline]
     pub fn edge_to(&self, origin: usize, destination: usize) -> Option<Edge> {
-        self.edge_index_to(origin, destination)
-            .map(|edge_index| self.edges[edge_index])
-    }
-
-    fn edge_index_to(&self, origin: usize, destination: usize) -> Option<usize> {
-        if let Some(indices) = &self.dense_edge_indices {
-            let edge_index = indices[origin * self.zone_ids.len() + destination];
-            return (edge_index != usize::MAX).then_some(edge_index);
+        if let Some(travel) = &self.dense_travel {
+            return travel.forward[origin * self.zone_ids.len() + destination].edge(destination);
         }
         self.outgoing(origin)
             .binary_search_by_key(&destination, |edge| edge.destination)
             .ok()
-            .map(|index| self.offsets[origin] + index)
+            .map(|index| self.edges[self.offsets[origin] + index])
     }
 
+    /// Exact travel edge read from the row-major dense factor-map view when
+    /// available. Sparse graphs retain the regular CSR lookup.
     #[inline]
-    pub fn surface_bands(
-        &self,
-        origin: usize,
-        destination: usize,
-        next: usize,
-    ) -> Option<(u8, u8)> {
-        let inbound = self.edge_index_to(origin, destination)?;
-        let outbound = self.edge_index_to(destination, next)?;
-        Some((
-            self.outgoing_cost_bands[inbound],
-            self.outgoing_time_bands[inbound].max(self.incoming_time_bands[outbound]),
-        ))
+    pub fn factor_edge_from(&self, origin: usize, destination: usize) -> Option<Edge> {
+        if let Some(travel) = &self.dense_travel {
+            return travel.forward[origin * self.zone_ids.len() + destination].edge(destination);
+        }
+        self.edge_to(origin, destination)
+    }
+
+    /// Exact travel edge read from the destination-major dense factor-map
+    /// view. This makes a varying origin with a fixed destination contiguous.
+    #[inline]
+    pub fn factor_edge_to(&self, origin: usize, destination: usize) -> Option<Edge> {
+        if let Some(travel) = &self.dense_travel {
+            return travel.transpose[destination * self.zone_ids.len() + origin].edge(destination);
+        }
+        self.edge_to(origin, destination)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(origin: u32, destination: u32, cost: f64) -> OdCostRow {
+        OdCostRow {
+            origin,
+            destination,
+            cost,
+            time: cost + 1.0,
+        }
+    }
+
+    fn assert_edge(graph: &OdGraph, origin: usize, destination: usize, cost: f64) {
+        for edge in [
+            graph.edge_to(origin, destination),
+            graph.factor_edge_from(origin, destination),
+            graph.factor_edge_to(origin, destination),
+        ] {
+            let edge = edge.expect("edge should exist");
+            assert_eq!(edge.destination, destination);
+            assert_eq!(edge.cost, cost);
+            assert_eq!(edge.time, cost + 1.0);
+        }
+    }
+
+    fn assert_missing(graph: &OdGraph, origin: usize, destination: usize) {
+        assert!(graph.edge_to(origin, destination).is_none());
+        assert!(graph.factor_edge_from(origin, destination).is_none());
+        assert!(graph.factor_edge_to(origin, destination).is_none());
+    }
+
+    #[test]
+    fn dense_and_sparse_lookups_agree_on_present_and_missing_edges() {
+        let dense = OdGraph::build(vec![row(0, 1, 10.0), row(1, 2, 20.0), row(2, 0, 30.0)])
+            .expect("dense graph should build");
+        assert!(dense.dense_travel.is_some());
+        assert_edge(&dense, 0, 1, 10.0);
+        assert_missing(&dense, 0, 2);
+
+        let sparse = OdGraph::build(vec![
+            row(0, 1, 10.0),
+            row(1, 2, 20.0),
+            row(2, 3, 30.0),
+            row(3, 4, 40.0),
+            row(4, 0, 50.0),
+        ])
+        .expect("sparse graph should build");
+        assert!(sparse.dense_travel.is_none());
+        assert_edge(&sparse, 0, 1, 10.0);
+        assert_missing(&sparse, 0, 2);
     }
 }
 
@@ -276,7 +312,6 @@ pub struct DestinationIndex {
     by_activity: HashMap<u32, Vec<Option<DestinationValue>>>,
     domains_by_activity: HashMap<u32, Vec<usize>>,
     attractive_by_activity: HashMap<u32, Vec<usize>>,
-    attraction_bands_by_activity: HashMap<u32, Vec<u8>>,
 }
 
 impl DestinationIndex {
@@ -366,21 +401,10 @@ impl DestinationIndex {
                 )
             })
             .collect();
-        let attraction_bands_by_activity = attractive_by_activity
-            .iter()
-            .map(|(&activity_id, ranked)| {
-                let mut bands = vec![u8::MAX; graph.zone_ids.len()];
-                for (rank, &zone) in ranked.iter().enumerate() {
-                    bands[zone] = (4 * rank / ranked.len()) as u8;
-                }
-                (activity_id, bands)
-            })
-            .collect();
         Ok(Self {
             by_activity,
             domains_by_activity,
             attractive_by_activity,
-            attraction_bands_by_activity,
         })
     }
 
@@ -403,12 +427,5 @@ impl DestinationIndex {
         self.attractive_by_activity
             .get(&activity_id)
             .map(Vec::as_slice)
-    }
-
-    #[inline]
-    pub fn attraction_band(&self, activity_id: u32, destination: usize) -> Option<u8> {
-        self.attraction_bands_by_activity
-            .get(&activity_id)
-            .and_then(|bands| (bands[destination] != u8::MAX).then_some(bands[destination]))
     }
 }

@@ -3,23 +3,24 @@
 ## Scope
 
 Working code is only bounded `DestinationPlanSearch.top_k()` and the exact
-`exact_top_k()` oracle. Retired paths are at `research-archive-2026-07-21`.
+`exact_top_k()` oracle. Retired paths are preserved by the Git tag
+`research-archive-2026-07-29`; inspect one with
+`git show research-archive-2026-07-29:<path>`. Do not restore archived source
+without a new, testable hypothesis.
 
 ## Commands
 
 - `just install` — editable Python package.
-- `just build-release` — release PyO3 extension.
+- `just build-release` — benchmarkable PyO3 extension.
+- `just build-fast` — quality-iteration build; never benchmark it.
 - `just test` — Python tests (after a build).
-- `just check` — format, Clippy, then tests.
-- `just compare-quality` — 50-context bounded-versus-exact default comparison.
-- `just compare-k-sweep [seed]` — K=10/20/50/100 against a fixed top-500 oracle support.
-- `just compare-k-sweep-seeds` — repeat that sweep for validation seeds 42–46.
-- `just audit-global-quality [per_stratum] [max_states]` — all-depth weighted oracle-audit pilot; failures remain visible.
-- `just compare-refresh` — 0/1/2/4 refresh quality trade-off.
-- `just benchmark-throughput` — 1,000-context eight-thread runtime profile.
+- `just check` — format, Clippy, release build, then tests.
+- Fast screens: `just explore-quality NAME=VALUE`, then
+  `just explore-throughput NAME=VALUE`.
+- Decision workflow and metrics: `experiments/measurement-guide.md`.
 
-Use `rg` for files/text; use `ast-grep` for syntax-aware Rust/Python search or
-mechanical refactors.
+Run `just --list` for the current command catalog. Use `rg` for files/text and
+`ast-grep` for syntax-aware Rust/Python search or mechanical refactors.
 
 ## Ownership and routing
 
@@ -32,6 +33,8 @@ mechanical refactors.
   boundary: `rust/api.rs`.
 - Current decision/measurements: `experiments/active-bidirectional-top-k.md`,
   `BENCHMARKS.md`. Archive decisions: `experiments/historical.md`.
+- Working-model and option guide: `ACTIVE_SEARCH.md`. Read it before opening
+  `rust/top_k/mod.rs`; it maps tasks to the smallest relevant source files.
 
 ## Change rule
 

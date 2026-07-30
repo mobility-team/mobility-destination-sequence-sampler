@@ -8,7 +8,7 @@ The retained heap oracle combines home splitting, relaxed bounds, and lazy
 sibling expansion. Its state budget remains essential for loose-bound and
 repeated-anchor contexts.
 
-Historical factor-tree sampling and enumeration measurements are archived at
-`research-archive-2026-07-21`. Their conclusion remains: contiguous scans and
+Historical factor-tree sampling and enumeration measurements are preserved by
+the `research-archive-2026-07-29` Git tag. Their conclusion remains: contiguous scans and
 finite-contribution evaluation beat scalar pruning and sparse random
 traversal; exact all-zone work is not the active search path.

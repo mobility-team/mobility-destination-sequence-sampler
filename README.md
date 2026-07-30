@@ -3,23 +3,32 @@
 Rust/Python bounded destination-plan top-K search with an exact validation
 oracle. Mobility prepares inputs; this package owns destination choice.
 
+Transport modeller? Start with
+[`MODELLER_GUIDE.md`](MODELLER_GUIDE.md). It explains the algorithm with a
+small activity-plan example, makes the search guarantees explicit, translates
+the terminology, and gives a one-context debugging workflow.
+
 ## Public API
 
 `DestinationPlanSearch` is the only exported class.
 
 | Method | Purpose |
 |---|---|
-| `top_k()` | Bounded bidirectional search. Approximate, exact-score-ranked returned plans. |
-| `exact_top_k()` | Small-context oracle. Proves the requested top-K or raises at `max_states`. |
+| `top_k()` | Fast bounded search. Fully scores returned plans but does not prove they are the global top-K. |
+| `exact_top_k()` | Small-context oracle. Proves the requested top-K or raises `proof incomplete` at `max_states`. |
 
-`top_k()` uses unbinned exact factor-map proposals through depth 5 and bounded
-attractive, OD-near, and deterministic exploration proposals for longer plans;
-it carries repeated anchors and ranks stitched complete plans by
-the full rigidity-aware utility. See [`DESIGN.md`](DESIGN.md) for schemas and
-invariants.
+`top_k()` shortlists plausible destinations, grows partial plans from both
+ends, joins them near the middle, improves the best complete plans, and ranks
+them with the full rigidity-aware utility. Repeated anchors remain the same
+destination throughout a plan. Its report contains `top_k_is_proven=False`; a
+successfully completed exact report contains `top_k_is_proven=True`.
+See [`DESIGN.md`](DESIGN.md) for schemas and invariants.
 
 Only those paths are in the working tree. Particle, exhaustive-sampling, and
-second-order research is archived at `research-archive-2026-07-21`.
+second-order research is preserved by the `research-archive-2026-07-29` Git
+tag (for example, `git show research-archive-2026-07-29:<path>`). Start with
+[`ACTIVE_SEARCH.md`](ACTIVE_SEARCH.md) for the active algorithm and tuning
+contract.
 
 ## Development
 

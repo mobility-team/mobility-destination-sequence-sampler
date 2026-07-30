@@ -1,0 +1,25 @@
+{
+  "description": "Certified exact-oracle cases selected by depth and bounded top-10 outcome.",
+  "selection": "one median case per observed depth x {success, partial, zero} bucket from the two-per-stratum audit (seed 42)",
+  "cases": [
+    {"context": 44226, "layers": 2, "outcome": "success", "mass": 1.0},
+    {"context": 58111, "layers": 3, "outcome": "partial", "mass": 0.9168407039963464},
+    {"context": 47946, "layers": 3, "outcome": "success", "mass": 1.0},
+    {"context": 78999, "layers": 4, "outcome": "partial", "mass": 0.7470519197718553},
+    {"context": 48395, "layers": 4, "outcome": "success", "mass": 1.0},
+    {"context": 77375, "layers": 5, "outcome": "partial", "mass": 0.524300533016026},
+    {"context": 43131, "layers": 5, "outcome": "success", "mass": 1.0},
+    {"context": 48625, "layers": 5, "outcome": "zero", "mass": 0.0},
+    {"context": 57164, "layers": 6, "outcome": "partial", "mass": 0.8453418897610514},
+    {"context": 51675, "layers": 6, "outcome": "success", "mass": 1.0},
+    {"context": 13635, "layers": 6, "outcome": "zero", "mass": 0.0},
+    {"context": 2916, "layers": 7, "outcome": "partial", "mass": 0.5241218674548084},
+    {"context": 66088, "layers": 7, "outcome": "success", "mass": 1.0},
+    {"context": 28634, "layers": 7, "outcome": "zero", "mass": 0.0},
+    {"context": 62546, "layers": 8, "outcome": "partial", "mass": 0.6113827096988524},
+    {"context": 35879, "layers": 8, "outcome": "success", "mass": 1.0},
+    {"context": 25455, "layers": 9, "outcome": "partial", "mass": 0.5287887047777878},
+    {"context": 34184, "layers": 10, "outcome": "partial", "mass": 0.9110214544050517},
+    {"context": 59125, "layers": 10, "outcome": "success", "mass": 1.0}
+  ]
+}
