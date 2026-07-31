@@ -385,7 +385,7 @@ pub(super) fn search_context(
 }
 
 pub fn search_top_k_all(
-    graph: &OdGraph,
+    graphs: &BTreeMap<u32, OdGraph>,
     destinations: &DestinationIndex,
     contexts: &[Context],
     parameters: Parameters,
@@ -396,6 +396,12 @@ pub fn search_top_k_all(
         contexts
             .par_iter()
             .map(|context| {
+                let graph = graphs.get(&context.utility_profile_id).ok_or_else(|| {
+                    SamplerError::InvalidInput(format!(
+                        "missing OD costs for utility_profile_id={}",
+                        context.utility_profile_id
+                    ))
+                })?;
                 search_context(graph, destinations, context, parameters, options.clone())
             })
             .collect::<Vec<_>>()

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mobility-destination-sequence-sampler"
-version = "0.1.0"
+version = "0.1.1"
 description = "Bounded top-K destination-plan search and exact oracle for Mobility"
 readme = "README.md"
 requires-python = ">=3.11"

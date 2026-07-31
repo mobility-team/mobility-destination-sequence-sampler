@@ -251,6 +251,7 @@ mod tests {
 
     fn row(origin: u32, destination: u32, cost: f64) -> OdCostRow {
         OdCostRow {
+            utility_profile_id: 0,
             origin,
             destination,
             cost,

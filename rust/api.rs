@@ -10,6 +10,7 @@ use crate::scoring::Parameters;
 use crate::top_k::{
     search_top_k_all, ActiveTraceRequest, CandidateStrategy, TopKOptions, TopKReport,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Active deterministic destination-plan search.
@@ -19,7 +20,7 @@ use std::sync::Arc;
 /// expose the historical sampling and aggregate-solver experiments.
 #[pyclass]
 pub struct DestinationPlanSearch {
-    graph: OdGraph,
+    graphs: BTreeMap<u32, OdGraph>,
     destination_index: DestinationIndex,
 }
 
@@ -31,11 +32,32 @@ impl DestinationPlanSearch {
         od_costs: &Bound<'_, PyAny>,
         destination_inputs: &Bound<'_, PyAny>,
     ) -> Result<Self, SamplerError> {
-        let graph = OdGraph::build(parse_od_costs(od_costs)?)?;
+        let mut rows_by_profile = BTreeMap::<u32, Vec<_>>::new();
+        for row in parse_od_costs(od_costs)? {
+            rows_by_profile
+                .entry(row.utility_profile_id)
+                .or_default()
+                .push(row);
+        }
+        let mut graphs = BTreeMap::new();
+        for (profile_id, rows) in rows_by_profile {
+            graphs.insert(profile_id, OdGraph::build(rows)?);
+        }
+        let graph = graphs.values().next().ok_or_else(|| {
+            SamplerError::InvalidInput("od_costs must contain at least one row".to_string())
+        })?;
+        if graphs
+            .values()
+            .any(|candidate| candidate.zone_ids != graph.zone_ids)
+        {
+            return Err(SamplerError::InvalidInput(
+                "all utility profiles must contain the same OD zones".to_string(),
+            ));
+        }
         let destination_index =
-            DestinationIndex::build(parse_destination_inputs(destination_inputs)?, &graph)?;
+            DestinationIndex::build(parse_destination_inputs(destination_inputs)?, graph)?;
         Ok(Self {
-            graph,
+            graphs,
             destination_index,
         })
     }
@@ -136,7 +158,7 @@ impl DestinationPlanSearch {
         };
         let search_result = py.allow_threads(|| {
             search_top_k_all(
-                &self.graph,
+                &self.graphs,
                 &self.destination_index,
                 &contexts,
                 parameters,
@@ -227,7 +249,7 @@ impl DestinationPlanSearch {
                 seed_parameters.skip_infeasible = true;
                 Some(
                     search_top_k_all(
-                        &self.graph,
+                        &self.graphs,
                         &self.destination_index,
                         &contexts,
                         seed_parameters,
@@ -240,7 +262,7 @@ impl DestinationPlanSearch {
                 None
             };
             search_reference_top_k(
-                &self.graph,
+                &self.graphs,
                 &self.destination_index,
                 &contexts,
                 parameters,
