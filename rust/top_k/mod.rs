@@ -5,7 +5,7 @@
 //! modules own one phase each; shared state and invariants live here. See
 //! `MODELLER_GUIDE.md` for the plain-language model.
 
-use std::collections::{hash_map::Entry, BTreeSet, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::time::Instant;

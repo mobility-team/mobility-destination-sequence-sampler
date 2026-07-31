@@ -7,6 +7,7 @@ use crate::errors::SamplerError;
 
 #[derive(Clone, Copy, Debug)]
 pub struct OdCostRow {
+    pub utility_profile_id: u32,
     pub origin: u32,
     pub destination: u32,
     pub cost: f64,
@@ -43,6 +44,7 @@ pub struct Step {
 #[derive(Clone, Debug)]
 pub struct Context {
     pub context_id: u64,
+    pub utility_profile_id: u32,
     pub initial_zone: u32,
     pub steps: Vec<Step>,
 }
@@ -67,25 +69,36 @@ fn check_len(name: &str, expected: usize, actual: usize) -> Result<(), SamplerEr
 }
 
 pub fn parse_od_costs(df: &Bound<'_, PyAny>) -> Result<Vec<OdCostRow>, SamplerError> {
+    let columns: Vec<String> = df.getattr("columns")?.extract()?;
     let origin: Vec<u32> = column_as_vec(df, "origin")?;
     let destination: Vec<u32> = column_as_vec(df, "destination")?;
     let cost: Vec<f64> = column_as_vec(df, "cost")?;
     let time: Vec<f64> = column_as_vec(df, "time")?;
+    let utility_profile_id = if columns.iter().any(|column| column == "utility_profile_id") {
+        column_as_vec(df, "utility_profile_id")?
+    } else {
+        vec![0; origin.len()]
+    };
     check_len("destination", origin.len(), destination.len())?;
     check_len("cost", origin.len(), cost.len())?;
     check_len("time", origin.len(), time.len())?;
+    check_len("utility_profile_id", origin.len(), utility_profile_id.len())?;
 
-    Ok(origin
+    Ok(utility_profile_id
         .into_iter()
+        .zip(origin)
         .zip(destination)
         .zip(cost)
         .zip(time)
-        .map(|(((origin, destination), cost), time)| OdCostRow {
-            origin,
-            destination,
-            cost,
-            time,
-        })
+        .map(
+            |((((utility_profile_id, origin), destination), cost), time)| OdCostRow {
+                utility_profile_id,
+                origin,
+                destination,
+                cost,
+                time,
+            },
+        )
         .collect())
 }
 
@@ -215,11 +228,29 @@ pub fn parse_reference_contexts(
 
     let initial_context_id: Vec<u64> = column_as_vec(initial_locations_df, "context_id")?;
     let initial_zone: Vec<u32> = column_as_vec(initial_locations_df, "initial_zone")?;
+    let initial_columns: Vec<String> = initial_locations_df.getattr("columns")?.extract()?;
+    let utility_profile_id = if initial_columns
+        .iter()
+        .any(|column| column == "utility_profile_id")
+    {
+        column_as_vec(initial_locations_df, "utility_profile_id")?
+    } else {
+        vec![0; initial_context_id.len()]
+    };
     check_len("initial_zone", initial_context_id.len(), initial_zone.len())?;
+    check_len(
+        "utility_profile_id",
+        initial_context_id.len(),
+        utility_profile_id.len(),
+    )?;
     let mut initial_by_context = BTreeMap::new();
-    for (context_id, initial_zone) in initial_context_id.into_iter().zip(initial_zone) {
+    for ((context_id, initial_zone), utility_profile_id) in initial_context_id
+        .into_iter()
+        .zip(initial_zone)
+        .zip(utility_profile_id)
+    {
         if initial_by_context
-            .insert(context_id, initial_zone)
+            .insert(context_id, (initial_zone, utility_profile_id))
             .is_some()
         {
             return Err(SamplerError::InvalidInput(format!(
@@ -230,11 +261,12 @@ pub fn parse_reference_contexts(
 
     let mut contexts = Vec::with_capacity(steps_by_context.len());
     for (context_id, mut steps) in steps_by_context {
-        let initial_zone = initial_by_context.remove(&context_id).ok_or_else(|| {
-            SamplerError::InvalidInput(format!(
-                "initial_locations is missing context_id={context_id}"
-            ))
-        })?;
+        let (initial_zone, utility_profile_id) =
+            initial_by_context.remove(&context_id).ok_or_else(|| {
+                SamplerError::InvalidInput(format!(
+                    "initial_locations is missing context_id={context_id}"
+                ))
+            })?;
         steps.sort_unstable_by_key(|step| step.layer);
         if steps
             .iter()
@@ -247,6 +279,7 @@ pub fn parse_reference_contexts(
         }
         contexts.push(Context {
             context_id,
+            utility_profile_id,
             initial_zone,
             steps,
         });

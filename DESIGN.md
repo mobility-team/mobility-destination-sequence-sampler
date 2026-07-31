@@ -11,15 +11,19 @@ use the bounded bidirectional search. That destination need not equal
 `initial_zone`.
 
 ```text
-OD:          origin, destination, cost, time
+OD:          utility_profile_id, origin, destination, cost, time
 destination: activity_id, destination, opportunity_capacity,
              country_value_coefficient, saturation_utility, shadow_price
 steps:       context_id, layer, activity_id, anchor_id, fixed_destination,
              departure_time, next_departure_time, duration_per_person,
              value_of_time, mean_duration_per_person, min_activity_time,
              arrival_time, arrival_time_rigidity, departure_time_rigidity
-initial:     context_id, initial_zone
+initial:     context_id, utility_profile_id, initial_zone
 ```
+
+`utility_profile_id` is optional and defaults to zero. Several profiles can
+be searched in one call. They share destination metadata and one context-level
+thread pool, while each context reads the OD costs assigned to its profile.
 
 Repeated non-null `anchor_id`s share one destination. Capacity applies once;
 each visit still receives activity/travel utility.

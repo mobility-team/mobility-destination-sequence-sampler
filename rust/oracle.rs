@@ -1217,6 +1217,7 @@ fn search_reference_top_k_sequential(
                     }
                     let segment_context = Context {
                         context_id: context.context_id,
+                        utility_profile_id: context.utility_profile_id,
                         initial_zone: context.initial_zone,
                         steps,
                     };
@@ -1355,6 +1356,7 @@ fn search_reference_top_k_sequential(
                 }
                 let conditioned_context = Context {
                     context_id: context.context_id,
+                    utility_profile_id: context.utility_profile_id,
                     initial_zone: context.initial_zone,
                     steps,
                 };
@@ -1635,7 +1637,7 @@ fn search_reference_top_k_sequential(
 
 #[allow(clippy::too_many_arguments)]
 pub fn search_reference_top_k(
-    graph: &OdGraph,
+    graphs: &BTreeMap<u32, OdGraph>,
     destinations: &DestinationIndex,
     contexts: &[Context],
     parameters: Parameters,
@@ -1644,11 +1646,20 @@ pub fn search_reference_top_k(
     n_threads: Option<usize>,
     seed_output: Option<&OutputTable>,
 ) -> Result<(OutputTable, HeapSearchReport), SamplerError> {
-    let seed_plans = seed_output.map(|output| seed_plans_by_context(graph, output));
+    let representative_graph = graphs.values().next().ok_or_else(|| {
+        SamplerError::InvalidInput("at least one OD utility profile is required".to_string())
+    })?;
+    let seed_plans = seed_output.map(|output| seed_plans_by_context(representative_graph, output));
     let compute = || {
         contexts
             .par_iter()
             .map(|context| {
+                let graph = graphs.get(&context.utility_profile_id).ok_or_else(|| {
+                    SamplerError::InvalidInput(format!(
+                        "missing OD costs for utility_profile_id={}",
+                        context.utility_profile_id
+                    ))
+                })?;
                 search_reference_top_k_sequential(
                     graph,
                     destinations,

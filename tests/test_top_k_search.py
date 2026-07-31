@@ -73,6 +73,62 @@ def test_two_step_top_k_matches_the_exact_oracle() -> None:
     assert report["active_trace_targets"] == []
 
 
+def test_profiles_are_searched_together_with_their_own_od_costs() -> None:
+    steps, initial_locations, od_costs, destination_inputs = reference_steps()
+    profiled_costs = pl.concat(
+        [
+            od_costs.with_columns(utility_profile_id=pl.lit(0, dtype=pl.UInt32)),
+            od_costs.with_columns(
+                utility_profile_id=pl.lit(1, dtype=pl.UInt32),
+                cost=pl.when(
+                    (pl.col("origin") == 0) & (pl.col("destination") == 1)
+                )
+                .then(10.0)
+                .otherwise(pl.col("cost")),
+            ),
+        ]
+    )
+    profiled_steps = pl.concat(
+        [steps, steps.with_columns(context_id=pl.lit(200, dtype=pl.Int64))]
+    )
+    profiled_locations = pl.concat(
+        [
+            initial_locations.with_columns(
+                utility_profile_id=pl.lit(0, dtype=pl.UInt32)
+            ),
+            initial_locations.with_columns(
+                context_id=pl.lit(200, dtype=pl.Int64),
+                utility_profile_id=pl.lit(1, dtype=pl.UInt32),
+            ),
+        ]
+    )
+
+    plans, report = DestinationPlanSearch(
+        od_costs=profiled_costs,
+        destination_inputs=destination_inputs,
+    ).top_k(
+        steps=profiled_steps,
+        initial_locations=profiled_locations,
+        logit_scale=1.0,
+        update_plan_timings=True,
+        use_shadow_prices=False,
+        exploration_seed=13,
+        top_k=1,
+    )
+
+    chosen = (
+        plans.filter(pl.col("layer") == 0)
+        .sort("context_id")
+        .select("context_id", "destination")
+        .to_dicts()
+    )
+    assert chosen == [
+        {"context_id": 100, "destination": 1},
+        {"context_id": 200, "destination": 2},
+    ]
+    assert report["contexts"] == 2
+
+
 def test_exact_oracle_rejects_negative_intermediate_duration() -> None:
     od_costs = pl.DataFrame(
         {

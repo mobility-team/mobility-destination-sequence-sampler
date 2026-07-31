@@ -24,6 +24,12 @@ destination throughout a plan. Its report contains `top_k_is_proven=False`; a
 successfully completed exact report contains `top_k_is_proven=True`.
 See [`DESIGN.md`](DESIGN.md) for schemas and invariants.
 
+Callers can supply an optional `utility_profile_id` on OD costs and initial
+locations. This searches several population-specific cost profiles in one
+call: destination metadata and parallel scheduling are shared, while each
+context uses its assigned OD graph. Calls without the column keep the original
+single-profile behavior.
+
 Only those paths are in the working tree. Particle, exhaustive-sampling, and
 second-order research is preserved by the `research-archive-2026-07-29` Git
 tag (for example, `git show research-archive-2026-07-29:<path>`). Start with
